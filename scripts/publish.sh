@@ -67,7 +67,7 @@ step "4/5 版本号 $VERSION"
 npm version "$VERSION" --no-git-tag-version || npm version "$VERSION"
 
 step "5/5 发布到 npm"
-npm publish
+npm publish --registry=https://registry.npmjs.org/
 
 echo
 echo "🎉 发布完成！"

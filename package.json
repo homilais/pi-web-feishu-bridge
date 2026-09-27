@@ -1,0 +1,58 @@
+{
+  "name": "pi-web-feishu-bridge",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "飞书远程指挥 pi 编码 agent（外挂式桥接 @agegr/pi-web）",
+  "keywords": [
+    "pi",
+    "pi-web",
+    "feishu",
+    "lark",
+    "bridge",
+    "coding-agent"
+  ],
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "pi-web-feishu-bridge": "dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "node --watch --env-file-if-exists=.env src/cli.ts",
+    "start": "node dist/cli.js",
+    "start:ts": "node --env-file-if-exists=.env src/cli.ts",
+    "prepublishOnly": "npm run build && npm run typecheck",
+    "typecheck": "tsc --noEmit",
+    "probe:feishu": "node --env-file-if-exists=.env src/probes/probe-feishu.ts",
+    "probe:health": "node --env-file-if-exists=.env src/probes/probe-health.ts",
+    "probe:piweb": "node --env-file-if-exists=.env src/probes/probe-piweb.ts",
+    "publish:dry-run": "bash scripts/publish.sh dry-run"
+  },
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.74.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.4",
+    "typescript": "^5.9.3"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/homilais/pi-web-feishu-bridge.git"
+  },
+  "bugs": {
+    "url": "https://github.com/homilais/pi-web-feishu-bridge/issues"
+  },
+  "homepage": "https://github.com/homilais/pi-web-feishu-bridge#readme",
+  "publishConfig": {
+    "access": "public"
+  }
+}

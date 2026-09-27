@@ -422,19 +422,48 @@ export class Bridge {
 
     let text = '（暂无回复）';
     if (sid) {
-      try {
-        const msgs = (await this.client.getSessionContext(sid, 30)).context.messages;
-        for (let i = msgs.length - 1; i >= 0; i--) {
-          const m = msgs[i];
-          if (m.role !== 'assistant') continue;
-          const texts = m.content.filter((c) => c.type === 'text' && c.text);
-          if (texts.length) {
-            text = texts[texts.length - 1].text!;
-            break;
+      // 最多重试 2 次（切项目时 agent 可能尚未从磁盘加载完毕）
+      for (let attempt = 0; attempt < 2; attempt++) {
+        try {
+          const msgs = (await this.client.getSessionContext(sid, 30)).context.messages;
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            const m = msgs[i];
+            if (m.role !== 'assistant') continue;
+            const texts = m.content.filter((c) => c.type === 'text' && c.text);
+            if (texts.length) {
+              text = texts[texts.length - 1].text!;
+              break;
+            }
+          }
+          if (text !== '（暂无回复）') break; // 找到了，退出
+          if (msgs.length > 0 && attempt === 0) {
+            // 有消息但没找到 assistant 文本，等 500ms 重试
+            await new Promise((r) => setTimeout(r, 500));
+            continue;
+          }
+        } catch (e) {
+          if (attempt === 0) {
+            log.warn(`getSessionContext 第 1 次失败，重试：${String(e).slice(0, 100)}`);
+            await new Promise((r) => setTimeout(r, 500));
           }
         }
-      } catch {
-        /* 拉取失败不影响摘要 */
+      }
+    } else {
+      // 没有 agentId，尝试 ensureAgent 创建一个（不阻塞，失败就跳过）
+      const newSid = await this.ensureAgent(cwd, chatId).catch(() => undefined);
+      if (newSid) {
+        try {
+          const msgs = (await this.client.getSessionContext(newSid, 30)).context.messages;
+          for (let i = msgs.length - 1; i >= 0; i--) {
+            const m = msgs[i];
+            if (m.role !== 'assistant') continue;
+            const texts = m.content.filter((c) => c.type === 'text' && c.text);
+            if (texts.length) {
+              text = texts[texts.length - 1].text!;
+              break;
+            }
+          }
+        } catch { /* 忽略 */ }
       }
     }
 

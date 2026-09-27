@@ -58,7 +58,7 @@ npm run probe:health
 [http://127.0.0.1:30141]
   ✅ Pi-Web 已启动，鉴权通过，运行中 agent 1 个
   ✅ 会话文件 17 个，覆盖 5 个项目空间
-  ✅ 模型 15 个（sensenova、ModelScope、…）
+  ✅ 模型 N 个
 [飞书]
   ✅ 应用凭据有效，可换取 token（cli_aa3d…）
 [本地进程]
@@ -106,7 +106,7 @@ npm run probe:health
 | 直接下任务 | 发消息即可，流式卡片实时回传 |
 | 看正在跑什么 | 发 `/last`（执行中会显示实时进展） |
 | 换一个项目 | `/info` 下拉选，或回复那张项目的任务卡 |
-| 换模型 | `/info` 下拉选，或 `/model sensenova/kimi-k3` |
+| 换模型 | `/info` 下拉选，或 `/model <provider/modelId>` |
 | 中止任务 | 点任务卡「⏹ 停止」，或 `/abort` |
 | 审批工具操作 | 点审批卡「✅ 允许」/「❌ 拒绝」 |
 | 释放给本地终端 | `/release`（不打断任务，下次提示重选项目） |
@@ -153,4 +153,4 @@ npm run probe:health
 - `PI_WEB_IDLE_TIMEOUT_MS` 建议设 `0`（桥接常驻）；设小值会让 agent 被回收，表现为「⚪ 已回收」。
 - 会话释放无显式接口，靠 idle 超时；`/release` 只做**桥接侧解绑**，不主动 kill agent。
 - 进展卡是快照，不是实时流；要看持续更新请看任务卡本身。
-- 模型需选稳定的：`sensenova/*` 稳定；`ModelScope/*`、`BaiLian/*` 会间歇返回空文本（触发 auto_retry）。
+- 模型需选稳定的：部分供应商/模型会间歇返回空文本（触发 auto_retry）；换模型之前先用小任务验证。

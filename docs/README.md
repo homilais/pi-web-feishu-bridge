@@ -115,7 +115,7 @@ src/
 2. **完成通知挂 `agent_settled` 而非 `agent_end`** —— `agent_end` 之后可能还有 auto_retry / 上下文压缩 / 队列消息，`agent_settled` 才是真正彻底空闲。
 3. **飞书侧用官方 `createLarkChannel()`** —— 长连接、流式卡片、按钮回调、白名单、去重、分片、重试全部内置，不自搓飞书协议。
 4. **`PI_WEB_IDLE_TIMEOUT_MS` 需按工作流调整** —— 桥接常驻设 `0`（防会话被回收）；要频繁交给终端就设 `60000`（1 分钟后自动释放锁）。
-5. **模型需选稳定的** —— 实测 `sensenova/*`（kimi-k3 等）稳定流式；`ModelScope/*`、`BaiLian/*` 会间歇返回空文本。
+5. **模型需选稳定的** —— 部分供应商/模型会间歇返回空文本、触发 auto_retry；换模型之前先用小任务验证一下。
 6. **执行进展不用 SSE** —— `GET /api/sessions/[id]/context` 在**执行中**就返回实时消息（assistant 流式文本 / toolCall / toolResult），轮询即可拼装进展快照。见 `getLiveProgress`。
 7. **卡片优先于文本** —— 含结构化信息或需要用户操作的回复一律走卡片；纯状态回执（≤1 行）保持文本。提示语并入卡片顶部而非另发消息。
 

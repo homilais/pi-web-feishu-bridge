@@ -124,8 +124,8 @@ npm run probe:piweb
 # 期望：创建 agent → 发 prompt → 收到 message_update 流式 → agent_settled
 ```
 
-> ⚠️ 已知：`ModelScope/deepseek-ai/DeepSeek-V4.1-Flash` 会间歇性返回空文本（触发 auto_retry）。
-> 建议用 `sensenova/*` 系列做流式验证；正式跑时可用 `/info` 下拉或 `/model` 切换。
+> ⚠️ 已知：部分供应商/模型会间歇性返回空文本（触发 auto_retry）；正式跑之前先用小任务验证一下。
+> 切模型可用 `/info` 下拉或 `/model <provider/modelId>`。
 
 ### 5.2 飞书侧（需凭据）
 
@@ -157,7 +157,7 @@ node --env-file-if-exists=.env src/index.ts
 |---|---|---|
 | Basic Auth（用户名 `pi`） | ✅ | 实测 |
 | `/api/agent/new` ensure_session | ✅ | 实测 |
-| SSE `message_update`/`text_delta` 流式 | ✅ | 实测（GLM 53 个增量） |
+| SSE `message_update`/`text_delta` 流式 | ✅ | 实测可收到完整文本增量 |
 | `agent_settled` 完成判定 | ✅ | 实测 |
 | 审批事件 → 卡片按钮 → `extension_ui_response` | ✅ | 全链路实测 |
 | 飞书卡片 V2 `behaviors` 按钮回调 | ✅ | 实测（`switch`/`setmodel` 回调） |

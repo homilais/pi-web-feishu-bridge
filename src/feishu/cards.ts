@@ -212,7 +212,7 @@ export function statusCard(opts: {
       : cur.running
         ? '🟢 进程就绪'
         : cur.hasAgent
-          ? '🟡 可恢复'
+          ? '⚪ 已回收'
           : '⚪ 无进程'
     : '—';
 

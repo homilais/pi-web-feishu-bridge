@@ -78,13 +78,15 @@ export class Bridge {
     let n = 0;
     for (const e of this.registry.agentEntries()) {
       const st = await this.client.getState(e.agentId).catch(() => null);
-      if (st && !st.running) {
+      // 只清理真正无效的 agent（sid 不存在或已被删除）
+      // 已回收的 agent（!running）还有历史消息，不应该清理
+      if (!st) {
         this.registry.clearAgent(e.cwd);
         for (const c of this.registry.chatBindings()) {
           if (c.cwd === e.cwd) this.registry.unbindChat(c.chatId);
         }
         n++;
-        log.info(`清理已回收 agent ${e.agentId.slice(-6)} (cwd=${e.cwd})`);
+        log.info(`清理无效 agent ${e.agentId.slice(-6)} (cwd=${e.cwd})`);
       }
     }
     if (n) this.projectCache = undefined;
@@ -368,8 +370,10 @@ export class Bridge {
 
   private async handleSwitch(evt: CardActionEvent, cwd: string): Promise<void> {
     this.registry.bindProject(evt.chatId, cwd);
+    // 先确保 agent 存在（会创建或采纳），再获取状态
+    const { sid, running } = (await this.resolveAgentId(cwd, evt.chatId)) ?? {};
     const projects = await this.getProjects(true); // 强制刷新状态
-    const cwd2 = this.registry.projectOf(evt.chatId);
+    const cwd2 = this.registry.projectOf(evt.chatId) ?? cwd; // 兜底，防止 undefined
     const agent = cwd2 ? this.registry.getAgent(cwd2) : undefined;
     const curRef = agent?.agentId ? await this.currentModelRef(agent.agentId) : undefined;
     const models = await this.getModelsCached();
@@ -380,11 +384,107 @@ export class Bridge {
     await this.sendContextSummary(evt.chatId);
   }
 
+  /** 获取 cwd 对应的 sid 和运行状态。
+   *  优先 registry 缓存，失败则剔除后重试一次。
+   *  返回 { sid, running } 供调用方使用。
+   */
+  private async resolveAgentId(cwd: string, chatId: string): Promise<{ sid: string; running: boolean } | undefined> {
+    // 第一步：获取 sid（通过 ensureAgent，内部会查 registry 和 pi-web）
+    const sid = await this.ensureAgent(cwd, chatId).catch(() => undefined);
+    if (!sid) return undefined;
+
+    // 第二步：验证 sid 是否有效（能被 pi-web 查询到）
+    const projects = await this.getProjects();
+    const info = projects.find((p) => p.cwd === cwd);
+    const running = info?.running ?? false;
+
+    // 如果 sid 无效（被删除），剔除缓存后重试一次
+    try {
+      await this.client.getState(sid); // 轻量检查
+    } catch (e) {
+      log.warn(`[resolveAgentId] sid=${sid.slice(-6)} 无效（可能被删除），剔除缓存重试：${String(e).slice(0, 80)}`);
+      this.registry.clearAgent(cwd);
+      const newSid = await this.ensureAgent(cwd, chatId).catch(() => undefined);
+      if (!newSid) return undefined;
+      // 重新获取运行状态
+      const newProjects = await this.getProjects();
+      const newInfo = newProjects.find((p) => p.cwd === cwd);
+      return { sid: newSid, running: newInfo?.running ?? false };
+    }
+
+    return { sid, running };
+  }
+
   /** 切会话/切项目后补发「当前上下文摘要」—— 与 /last 共用卡片样式。 */
   private async sendContextSummary(chatId: string): Promise<void> {
+    log.info(`[sendContextSummary] 开始，chatId=${chatId.slice(-6)}`);
     const cwd = this.registry.projectOf(chatId);
-    if (!cwd) return;
-    const sid = this.registry.getAgent(cwd)?.agentId;
+    if (!cwd) {
+      log.warn(`[sendContextSummary] cwd 为 undefined，退出`);
+      return;
+    }
+
+    // 第一步：获取 sid 和运行状态
+    const { sid, running } = (await this.resolveAgentId(cwd, chatId)) ?? {};
+
+    // 第二步：获取历史（如果 sid 无效，剔除缓存后重试一次）
+    let text = '';
+    let msgModelRef: string | undefined; // 消息本身的模型（agent 不活动时用这个）
+    if (sid) {
+      try {
+        const msgs = (await this.client.getSessionContext(sid, 30)).context.messages;
+        log.info(`[sendContextSummary] sid=${sid.slice(-6)} msgs=${msgs.length}`);
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const m = msgs[i];
+          if (m.role !== 'assistant') continue;
+          const texts = m.content.filter((c) => c.type === 'text' && c.text);
+          if (texts.length) {
+            text = texts[texts.length - 1].text!;
+            // 记录消息本身的模型（agent 不活动时用）
+            const prov = typeof m.provider === 'string' ? m.provider : undefined;
+            const mdl = typeof m.model === 'string' ? m.model : undefined;
+            msgModelRef = prov && mdl ? `${prov}/${mdl}` : mdl;
+            break;
+          }
+        }
+        if (!text) {
+          log.warn(`[sendContextSummary] 没有找到 assistant 文本，最后消息角色=${msgs.length > 0 ? msgs[msgs.length - 1].role : 'N/A'}`);
+        }
+      } catch (e) {
+        log.warn(`[sendContextSummary] getSessionContext 失败：${String(e).slice(0, 100)}`);
+        // 剔除缓存的 sid，重新获取
+        this.registry.clearAgent(cwd);
+        const newResult = await this.resolveAgentId(cwd, chatId);
+        if (newResult) {
+          const newSid = newResult.sid;
+          try {
+            const msgs = (await this.client.getSessionContext(newSid, 30)).context.messages;
+            log.info(`[sendContextSummary] 重试 sid=${newSid.slice(-6)} msgs=${msgs.length}`);
+            for (let i = msgs.length - 1; i >= 0; i--) {
+              const m = msgs[i];
+              if (m.role !== 'assistant') continue;
+              const texts = m.content.filter((c) => c.type === 'text' && c.text);
+              if (texts.length) {
+                text = texts[texts.length - 1].text!;
+                const prov = typeof m.provider === 'string' ? m.provider : undefined;
+                const mdl = typeof m.model === 'string' ? m.model : undefined;
+                msgModelRef = prov && mdl ? `${prov}/${mdl}` : mdl;
+                break;
+              }
+            }
+          } catch (e2) {
+            log.warn(`[sendContextSummary] 重试也失败：${String(e2).slice(0, 100)}`);
+          }
+        }
+      }
+    }
+
+    // 无 sid 或无历史
+    if (!text) {
+      text = sid ? '（该会话暂无 assistant 文本回复）' : '（无记录）';
+    }
+
+    // 获取状态和模型信息
     const projects = await this.getProjects();
     const p = projects.find((x) => x.cwd === cwd);
     const label = p?.label ?? cwd;
@@ -394,76 +494,21 @@ export class Bridge {
         : p.running
           ? '🟢 空闲'
           : p.hasAgent
-            ? '🟡 可恢复'
+            ? '⚪ 已回收'
             : '⚪ 无进程'
       : '?';
 
-    // 当前模型（与 listProjects 一致：从 state.model 拼 ref）
     let modelRef: string | undefined;
     if (sid) {
       const st = await this.client.getState(sid).catch(() => null);
-      if (st?.state?.model) {
-        modelRef = `${st.state.model.provider}/${st.state.model.id}`;
-      }
-      // 执行中 → 进展卡（而不是过期的最后回复）
-      if (st?.running && (st.state?.isPromptRunning || st.state?.isStreaming)) {
-        const progress = await this.client.getLiveProgress(sid).catch(() => null);
-        if (progress) {
-          await this.sendRouteCard(
-            chatId,
-            progressCard({ projectLabel: label, progress }),
-            cwd,
-            sid,
-          );
-          return;
+      // agent 有进程活动 → 用当前配置的模型
+      if (running) {
+        if (st?.state?.model) {
+          modelRef = `${st.state.model.provider}/${st.state.model.id}`;
         }
-      }
-    }
-
-    let text = '（暂无回复）';
-    if (sid) {
-      // 最多重试 2 次（切项目时 agent 可能尚未从磁盘加载完毕）
-      for (let attempt = 0; attempt < 2; attempt++) {
-        try {
-          const msgs = (await this.client.getSessionContext(sid, 30)).context.messages;
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            const m = msgs[i];
-            if (m.role !== 'assistant') continue;
-            const texts = m.content.filter((c) => c.type === 'text' && c.text);
-            if (texts.length) {
-              text = texts[texts.length - 1].text!;
-              break;
-            }
-          }
-          if (text !== '（暂无回复）') break; // 找到了，退出
-          if (msgs.length > 0 && attempt === 0) {
-            // 有消息但没找到 assistant 文本，等 500ms 重试
-            await new Promise((r) => setTimeout(r, 500));
-            continue;
-          }
-        } catch (e) {
-          if (attempt === 0) {
-            log.warn(`getSessionContext 第 1 次失败，重试：${String(e).slice(0, 100)}`);
-            await new Promise((r) => setTimeout(r, 500));
-          }
-        }
-      }
-    } else {
-      // 没有 agentId，尝试 ensureAgent 创建一个（不阻塞，失败就跳过）
-      const newSid = await this.ensureAgent(cwd, chatId).catch(() => undefined);
-      if (newSid) {
-        try {
-          const msgs = (await this.client.getSessionContext(newSid, 30)).context.messages;
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            const m = msgs[i];
-            if (m.role !== 'assistant') continue;
-            const texts = m.content.filter((c) => c.type === 'text' && c.text);
-            if (texts.length) {
-              text = texts[texts.length - 1].text!;
-              break;
-            }
-          }
-        } catch { /* 忽略 */ }
+      } else {
+        // agent 不活动（已回收）→ 用消息本身的模型
+        modelRef = msgModelRef;
       }
     }
 
@@ -488,25 +533,22 @@ export class Bridge {
 
   /**
    * 解析/创建 agent，三级策略（绝不无谓新建 session）：
-   *  1. pi-web 内存里该 cwd 有活跃 session → 采纳（真正复用进程）
-   *  2. 桥接记录过 agentId → 复用（进程可能不活，发 prompt 时 pi-web 自动从磁盘重建）
+   *  1. registry 缓存 → 直接复用（最快，本地）
+   *  2. pi-web 活跃进程 → 采纳并缓存
    *  3. 都没有 → POST /api/agent/new 创建
    */
   private async ensureAgent(cwd: string, chatId: string): Promise<string | undefined> {
-    // 1. 采纳活跃进程
+    // 1. 复用记录（最快，本地）
+    const tracked = this.registry.getAgent(cwd);
+    if (tracked?.agentId) return tracked.agentId;
+    // 2. 采纳活跃进程
     const projects = await this.getProjects();
     const info = projects.find((p) => p.cwd === cwd);
     if (info?.activeSessionId && info.running) {
-      const tracked = this.registry.getAgent(cwd);
-      if (tracked?.agentId !== info.activeSessionId) {
-        this.registry.adoptAgent(cwd, info.activeSessionId);
-        log.info(`采纳活跃 agent ${info.activeSessionId} (cwd=${cwd})`);
-      }
+      this.registry.adoptAgent(cwd, info.activeSessionId);
+      log.info(`采纳活跃 agent ${info.activeSessionId} (cwd=${cwd})`);
       return info.activeSessionId;
     }
-    // 2. 复用记录
-    const tracked = this.registry.getAgent(cwd);
-    if (tracked?.agentId) return tracked.agentId;
     // 3. 创建
     try {
       const ensureCmd: Record<string, unknown> = { type: 'ensure_session' };

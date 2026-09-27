@@ -173,6 +173,16 @@ export class PiWebClient {
     });
   }
 
+  /** SSE 订阅（返回 Response，调用方自行读取 body）。 */
+  async sse(agentId: string, signal: AbortSignal): Promise<Response> {
+    const res = await fetch(`${this.baseUrl}/api/agent/${agentId}/events`, {
+      headers: { Authorization: this.authHeader },
+      signal,
+    });
+    if (!res.ok || !res.body) throw new Error(`SSE HTTP ${res.status}`);
+    return res;
+  }
+
   sendPrompt(agentId: string, message: string) {
     return this.send(agentId, { type: 'prompt', message });
   }

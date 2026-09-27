@@ -25,17 +25,15 @@ function sleep(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-/** 单次 SSE 连接：fetch + 手动解析（因原生 EventSource 不支持自定义 Authorization 头）。 */
+/** 单次 SSE 连接：client.sse + 手动解析（因原生 EventSource 不支持自定义 Authorization 头）。 */
 async function connectOnce(
   client: PiWebClient,
   agentId: string,
   handlers: SseHandlers,
   signal: AbortSignal,
 ): Promise<void> {
-  const url = `${client.baseUrl}/api/agent/${agentId}/events`;
-  const res = await fetch(url, { headers: { Authorization: client.authHeader }, signal });
-  if (!res.ok || !res.body) throw new Error(`SSE HTTP ${res.status}`);
-  const reader = res.body.getReader();
+  const res = await client.sse(agentId, signal);
+  const reader = res.body!.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let dataLines: string[] = [];

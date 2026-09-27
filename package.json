@@ -1,6 +1,6 @@
 {
   "name": "pi-web-feishu-bridge",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "description": "飞书远程指挥 pi 编码 agent（外挂式桥接 @agegr/pi-web）",
   "keywords": [
@@ -24,7 +24,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "dev": "node --watch --env-file-if-exists=.env src/cli.ts",
-    "start": "node dist/cli.js",
+    "start": "node --env-file-if-exists=.env dist/cli.js",
     "start:ts": "node --env-file-if-exists=.env src/cli.ts",
     "prepublishOnly": "npm run build && npm run typecheck",
     "typecheck": "tsc --noEmit",

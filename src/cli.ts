@@ -95,6 +95,14 @@ function loadEnvFile(path: string): void {
   }
 }
 
+/** 默认加载当前目录的 .env（不存在时静默跳过）。 */
+function autoLoadEnv(): void {
+  const envPath = './.env';
+  if (existsSync(envPath)) {
+    loadEnvFile(envPath);
+  }
+}
+
 function usage(): void {
   console.error('运行 `pi-web-feishu-bridge --help` 查看用法。');
 }
@@ -144,7 +152,8 @@ async function cli(): Promise<void> {
     usage();
     process.exit(2);
   }
-  // 无参数：默认启动
+  // 无参数：默认加载当前目录 .env 并启动
+  autoLoadEnv();
   await runBridge();
 }
 

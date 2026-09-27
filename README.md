@@ -35,35 +35,105 @@ pi SDK（@earendil-works/pi-coding-agent）
 
 ## 快速上手
 
-### 1. 启动 pi-web 基座（首次安装 + 常驻运行）
+> 两种使用方式：
+> - **📦 npm 安装运行**（推荐，普通用户）：3 分钟跑起来
+> - **💻 从源码开发**（开发者）：改代码 / 跑探针 / 开发新功能
+
+---
+
+### 📦 从 npm 安装运行（推荐）
+
+#### 1. 安装 pi-web 基座
 
 ```bash
-# 一次性安装（全局）
+# 全局安装 pi-web（一次性）
 npm i -g @agegr/pi-web@0.9.3
 
-# 常驻运行（后台常驻一定要加 --no-open，否则每次启动会弹浏览器）
+# 常驻运行（后台服务，需先于桥接启动）
 PI_WEB_PASSWORD="你的密码" PI_WEB_IDLE_TIMEOUT_MS=0 \
   pi-web --no-open
-# ↑ 默认端口 30141；需要自定义时用 --port <port>
+# ↑ 默认端口 30141；自定义用 --port <port>
 # ↑ PI_WEB_IDLE_TIMEOUT_MS=0 防会话被自动回收，详见 docs/IMPLEMENTATION.md
 ```
 
-### 2. 安装本桥接
+#### 2. 安装桥接并初始化
 
 ```bash
+# 全局安装桥接
+npm i -g pi-web-feishu-bridge
+
+# 验证安装
+pi-web-feishu-bridge --version
+pi-web-feishu-bridge --help
+```
+
+#### 3. 配置密钥
+
+```bash
+# 建立工作目录（.env 与 registry.json 都写在这里）
+mkdir -p ~/pi-bridge && cd ~/pi-bridge
+
+# 生成 .env 模板
+pi-web-feishu-bridge --init
+
+# 编辑填密钥
+$EDITOR .env
+```
+
+必填 3 项：
+
+```ini
+PIWEB_PASSWORD=your-pi-web-password   # pi-web 的 Basic Auth 密码
+LARK_APP_ID=cli_xxx                    # 飞书应用 App ID
+LARK_APP_SECRET=xxx                    # 飞书应用 App Secret
+```
+
+其余配置（DEFAULT_MODEL / 白名单等）见 `--help` 输出或 [docs/IMPLEMENTATION.md](./docs/IMPLEMENTATION.md)。
+
+#### 4. 启动
+
+```bash
+# 终端 A：确认 pi-web 在跑（见 §1）
+
+# 终端 B：启动桥接
+cd ~/pi-bridge
+pi-web-feishu-bridge
+```
+
+成功标志：日志出现 `Pi-Web 连接正常，运行中 agent N 个` 与 `✅ 桥接已就绪`。
+
+#### 5. 常用操作
+
+```bash
+pi-web-feishu-bridge --env /path/to/.env   # 指定 .env 路径
+pi-web-feishu-bridge --cwd /some/dir       # 切目录后启动
+```
+
+---
+
+### 💻 从源码开发
+
+#### 1. 克隆仓库
+
+```bash
+git clone https://github.com/homilais/pi-web-feishu-bridge
 cd pi-web-feishu-bridge
+```
+
+#### 2. 安装依赖
+
+```bash
 npm install
 ```
 
-### 3. 配置环境变量
+#### 3. 配置环境变量
 
 ```bash
 cp .env.example .env
+$EDITOR .env
 ```
 
-必填：`PIWEB_PASSWORD`、`LARK_APP_ID`、`LARK_APP_SECRET`。可选：`PIWEB_BASE_URL`、`DEFAULT_MODEL`、飞书白名单。完整说明见 [`.env.example`](./.env.example)。
-
-### 4. 启动（两个独立终端）
+#### 4. 启动（两个独立终端）
 
 > `npm start` **只启动本桥接**，**不会**启动 pi-web。连不上 pi-web 时桥接会直接退出（`process.exit(1)`）。
 
@@ -73,19 +143,29 @@ PI_WEB_PASSWORD="你的密码" PI_WEB_IDLE_TIMEOUT_MS=0 pi-web --no-open
 
 # 终端 B：起桥接（依赖终端 A 已就绪）
 cd pi-web-feishu-bridge
-npm start                 # 生产启动
-npm run typecheck         # 类型检查（不用跑，纯开发时用）
+npm run dev                 # 开发模式（watch 热重载，直接跑 .ts）
+npm run typecheck           # 类型检查
+npm run build               # 编译到 dist/
 ```
 
-成功标志：桥接日志出现 `Pi-Web 连接正常，运行中 agent N 个` 与 `✅ 桥接已就绪`。
-
-### 5. 验证
+#### 5. 验证探针
 
 ```bash
 npm run probe:piweb     # 验证 pi-web 侧（无需飞书凭据）
 npm run probe:feishu    # 验证飞书长连接 + 卡片按钮回调
 npm run probe:health    # 端到端健康检查
 ```
+
+#### 6. 发布到 npm
+
+```bash
+npm login                      # 首次需登录
+./scripts/publish.sh dry-run   # 演练
+./scripts/publish.sh patch     # 发布
+```
+
+详见 [docs/PUBLISH.md](./docs/PUBLISH.md)。
+
 
 ## 指令一览
 

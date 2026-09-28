@@ -216,12 +216,26 @@ export class PiWebClient {
    *  不能用 runningSessionIds。每个 cwd 取一个代表 session 查。 */
   async listProjects(): Promise<ProjectInfo[]> {
     const sess = await this.listSessions();
-    // 每个 cwd 取最近修改的一个 session 作为代表
-    const byCwd = new Map<string, { count: number; rep?: { id: string; modified: string } }>();
+    // running 的 session（优先选为代表）
+    const runningIds = new Set(
+      (await this.getRunningReliable().catch(() => null))?.runningSessionIds ?? [],
+    );
+    // 每个 cwd 取一个代表 session：优先 running，其次最近修改的
+    const byCwd = new Map<
+      string,
+      { count: number; rep?: { id: string; modified: string; running: boolean } }
+    >();
     for (const s of sess.sessions) {
       const e = byCwd.get(s.cwd) ?? { count: 0 };
       e.count++;
-      if (!e.rep || s.modified > e.rep.modified) e.rep = { id: s.id, modified: s.modified };
+      const isRunning = runningIds.has(s.id);
+      if (
+        !e.rep ||
+        (isRunning && !e.rep.running) ||
+        (isRunning === e.rep.running && s.modified > e.rep.modified)
+      ) {
+        e.rep = { id: s.id, modified: s.modified, running: isRunning };
+      }
       byCwd.set(s.cwd, e);
     }
     const out: ProjectInfo[] = [];

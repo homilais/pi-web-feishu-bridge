@@ -195,7 +195,8 @@ function inputSummary(input: unknown): string {
 }
 
 /** /info：当前项目 + 模型 + 切换项目/模型下拉。
- *  notice：卡片顶部提示条（如「请先选择项目」），避免另发一条文本。 */
+ *  notice：卡片顶部提示条（如「请先选择项目」），避免另发一条文本。
+ *  未绑定项目时不展示模型列表。 */
 export function statusCard(opts: {
   currentCwd?: string;
   projects: ProjectInfo[];
@@ -210,7 +211,7 @@ export function statusCard(opts: {
     ? cur.busy
       ? '🔴 运行中'
       : cur.running
-        ? '🟢 进程就绪'
+        ? '🟢 空闲'
         : cur.hasAgent
           ? '⚪ 已回收'
           : '⚪ 无进程'
@@ -219,8 +220,9 @@ export function statusCard(opts: {
   const elements: object[] = [];
   if (opts.notice) elements.push(md(`📌 ${opts.notice}`));
 
+  // 项目列表：显示项目名称 + 是否在会话管理中
   const projectOpts: SelectOption[] = projects.map((p) => ({
-    label: `${p.label}（${p.busy ? '运行中' : p.running ? '有进程' : '无进程'}）`,
+    label: `${p.label}${p.hasAgent ? ' ✅' : ''}（${p.busy ? '运行中' : p.running ? '空闲' : '无进程'}）`,
     value: `project:${p.cwd}`,
   }));
   if (projectOpts.length) {
@@ -228,7 +230,8 @@ export function statusCard(opts: {
     elements.push(selectMenu('选择项目…', projectOpts, currentCwd ? `project:${currentCwd}` : undefined));
   }
 
-  if (models) {
+  // 模型列表：仅当已绑定项目且有 agent 时才展示
+  if (models && cur?.hasAgent) {
     const modelOpts: SelectOption[] = [
       { label: '默认（保留当前模型，不更换）', value: 'model:default' },
       ...models.providers.flatMap((p) =>

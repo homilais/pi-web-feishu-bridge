@@ -182,3 +182,4 @@ npm run probe:health # 健康检查探针
 3. **飞书 SDK 类型宽松** — `as any` 是必要的
 4. **ESM 导入** — 文件间用 `.js` 后缀（编译后路径）
 5. **registry 持久化** — 修改后调用 `registry.persist()`
+6. **禁止自动提交/发布** — 改完代码不要直接 `git commit` 或 `npm publish`，必须向用户申请，获得明确允许后才操作

@@ -15,6 +15,9 @@ export interface ChatBinding {
 export interface ProjectAgent {
   agentId: string;
   cwd: string;
+  model?: string;      // 当前模型 ref（provider/modelId）
+  lastActive: number;  // 最后活跃时间戳
+  firstBound: number;  // 首次绑定时间戳
 }
 
 /** 卡片消息 → 项目/agent 的路由映射（支持飞书「回复卡片」定向到进程）。 */
@@ -72,7 +75,7 @@ export class Registry {
             continue;
           }
           this.chats.set(b.chatId, { chatId: b.chatId, cwd, createdAt: b.createdAt });
-          if (b.agentId) this.agents.set(cwd, { agentId: b.agentId, cwd });
+          if (b.agentId) this.agents.set(cwd, { agentId: b.agentId, cwd, lastActive: b.createdAt, firstBound: b.createdAt });
           migrated++;
         }
         log.info(`v1→v2 迁移：${migrated} 条，跳过 ${skipped} 条（未知项目）`);
@@ -113,15 +116,51 @@ export class Registry {
     return this.agents.get(cwd);
   }
   setAgent(cwd: string, agentId: string): void {
-    this.agents.set(cwd, { agentId, cwd });
+    const now = Date.now();
+    const existing = this.agents.get(cwd);
+    this.agents.set(cwd, {
+      agentId,
+      cwd,
+      model: existing?.model,
+      lastActive: existing?.lastActive ?? now,
+      firstBound: existing?.firstBound ?? now,
+    });
     this.persist();
   }
   /** 采纳一个已存在的活跃 agent（不创建新进程）。 */
   adoptAgent(cwd: string, agentId: string): void {
     this.setAgent(cwd, agentId);
   }
+  /** 更新 agent 的模型信息（不改变 agentId）。 */
+  updateAgentModel(cwd: string, model: string): void {
+    const a = this.agents.get(cwd);
+    if (a) {
+      a.model = model;
+      a.lastActive = Date.now();
+      this.persist();
+    }
+  }
   clearAgent(cwd: string): void {
     if (this.agents.delete(cwd)) this.persist();
+  }
+  /** 清理指定 agentId 的所有路由记录（release 时调用）。 */
+  clearRoutesByAgent(agentId: string): number {
+    let n = 0;
+    for (const [msgId, route] of this.routes) {
+      if (route.agentId === agentId) {
+        this.routes.delete(msgId);
+        n++;
+      }
+    }
+    if (n) this.persist();
+    return n;
+  }
+  /** 检查某个 agentId 是否仍在会话管理集合中。 */
+  isAgentManaged(agentId: string): boolean {
+    for (const a of this.agents.values()) {
+      if (a.agentId === agentId) return true;
+    }
+    return false;
   }
   /** 所有项目 agent，供状态枚举时回填 hasAgent。 */
   agentEntries(): ProjectAgent[] {

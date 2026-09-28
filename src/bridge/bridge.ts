@@ -93,15 +93,15 @@ export class Bridge {
     return n;
   }
 
-  /** 发送 info 卡片（项目 + 模型 + 切换下拉）。 */
   /** 发 /info 卡片。notice：卡片顶部提示条（与文本合并成一条消息）。 */
   private async sendInfoCard(chatId: string, notice?: string): Promise<void> {
     await this.pruneDeadAgents(); // 先清理已回收的再展示
     const projects = await this.getProjects(true);
     const cur = this.registry.projectOf(chatId);
     const agent = cur ? this.registry.getAgent(cur) : undefined;
-    const curRef = agent?.agentId ? await this.currentModelRef(agent.agentId) : undefined;
-    const models = await this.getModelsCached();
+    // 仅当有 agent 时才获取模型信息
+    const curRef = agent?.agentId ? await this.currentModelRef(agent.agentId).catch(() => undefined) : undefined;
+    const models = agent?.agentId ? await this.getModelsCached() : null;
     await this.sendRouteCard(
       chatId,
       statusCard({ currentCwd: cur, projects, currentModelRef: curRef, models, notice }),
@@ -221,6 +221,11 @@ export class Bridge {
     if (msg.replyToMessageId) {
       const route = this.registry.routeFor(msg.replyToMessageId);
       if (route) {
+        // 检查该 agent 是否仍在会话管理集合中（release 后不允许回复）
+        if (!this.registry.isAgentManaged(route.agentId)) {
+          await this.sendInfoCard(msg.chatId, '⚠️ 该卡片对应的 Agent 已从会话管理中移除，请重新选择项目：');
+          return;
+        }
         const prev = this.registry.projectOf(msg.chatId);
         this.registry.bindProject(msg.chatId, route.cwd);
         log.info(
@@ -328,6 +333,8 @@ export class Bridge {
       if (agent?.agentId) {
         await this.client.abort(agent.agentId).catch((e) => log.warn('abort 失败', { e: String(e) }));
         await this.channel.send(evt.chatId, { text: '⏹ 已请求停止' }).catch(() => {});
+      } else {
+        await this.channel.send(evt.chatId, { text: '已经移除的 Agent' }).catch(() => {});
       }
       return;
     }
@@ -350,139 +357,173 @@ export class Bridge {
     const cwd = this.registry.projectOf(evt.chatId);
     const agent = cwd ? this.registry.getAgent(cwd) : undefined;
     if (!agent?.agentId) {
-      await this.sendErr(evt.chatId, '⚠️ 请先下发一条消息以创建 agent，再选模型');
+      await this.sendErr(evt.chatId, '已经移除的 Agent');
       return;
     }
     try {
       await this.client.setModel(agent.agentId, provider, modelId);
+      // 更新 registry 中记录的模型信息
+      this.registry.updateAgentModel(cwd!, ref);
       // 刷新为状态卡（显示新当前模型）
       const models = await this.getModelsCached();
       const projects = await this.getProjects(true);
       await this.channel
         .updateCard(evt.messageId, statusCard({ currentCwd: cwd, projects, currentModelRef: ref, models }))
         .catch(() => {});
-      // 额外发一条上下文摘要，帮用户回忆现状以便后续指令
-      await this.sendContextSummary(evt.chatId);
     } catch (e) {
       await this.sendErr(evt.chatId, `❌ 切换失败：${String(e).slice(0, 200)}`);
     }
   }
 
+  /** 切换项目（卡片回调 + /switch 指令共用）。
+   *  1. 先判断是否已在会话管理中 → 直接绑定
+   *  2. 不在 → 寻找已有 agentId 纳入会话管理（优先 running，然后非 running 历史）
+   *  3. 未找到 → 更新项目列表让重新选择
+   *  4. 找到 → 纳入 + 绑定 + 发送 last 卡片 */
   private async handleSwitch(evt: CardActionEvent, cwd: string): Promise<void> {
     this.registry.bindProject(evt.chatId, cwd);
-    // 先确保 agent 存在（会创建或采纳），再获取状态
-    const { sid, running } = (await this.resolveAgentId(cwd, evt.chatId)) ?? {};
-    const projects = await this.getProjects(true); // 强制刷新状态
-    const cwd2 = this.registry.projectOf(evt.chatId) ?? cwd; // 兜底，防止 undefined
-    const agent = cwd2 ? this.registry.getAgent(cwd2) : undefined;
-    const curRef = agent?.agentId ? await this.currentModelRef(agent.agentId) : undefined;
-    const models = await this.getModelsCached();
-    await this.channel
-      .updateCard(evt.messageId, statusCard({ currentCwd: cwd2, projects, currentModelRef: curRef, models }))
-      .catch(() => {});
-    // 切项目后发上下文摘要，帮用户回忆新项目现状
-    await this.sendContextSummary(evt.chatId);
-  }
+    this.projectCache = undefined; // 强制刷新状态
 
-  /** 获取 cwd 对应的 sid 和运行状态。
-   *  优先 registry 缓存，失败则剔除后重试一次。
-   *  返回 { sid, running } 供调用方使用。
-   */
-  private async resolveAgentId(cwd: string, chatId: string): Promise<{ sid: string; running: boolean } | undefined> {
-    // 第一步：获取 sid（通过 ensureAgent，内部会查 registry 和 pi-web）
-    const sid = await this.ensureAgent(cwd, chatId).catch(() => undefined);
-    if (!sid) return undefined;
-
-    // 第二步：验证 sid 是否有效（能被 pi-web 查询到）
-    const projects = await this.getProjects();
-    const info = projects.find((p) => p.cwd === cwd);
-    const running = info?.running ?? false;
-
-    // 如果 sid 无效（被删除），剔除缓存后重试一次
-    try {
-      await this.client.getState(sid); // 轻量检查
-    } catch (e) {
-      log.warn(`[resolveAgentId] sid=${sid.slice(-6)} 无效（可能被删除），剔除缓存重试：${String(e).slice(0, 80)}`);
-      this.registry.clearAgent(cwd);
-      const newSid = await this.ensureAgent(cwd, chatId).catch(() => undefined);
-      if (!newSid) return undefined;
-      // 重新获取运行状态
-      const newProjects = await this.getProjects();
-      const newInfo = newProjects.find((p) => p.cwd === cwd);
-      return { sid: newSid, running: newInfo?.running ?? false };
-    }
-
-    return { sid, running };
-  }
-
-  /** 切会话/切项目后补发「当前上下文摘要」—— 与 /last 共用卡片样式。 */
-  private async sendContextSummary(chatId: string): Promise<void> {
-    log.info(`[sendContextSummary] 开始，chatId=${chatId.slice(-6)}`);
-    const cwd = this.registry.projectOf(chatId);
-    if (!cwd) {
-      log.warn(`[sendContextSummary] cwd 为 undefined，退出`);
+    // 1. 先判断是否已在会话管理中
+    const tracked = this.registry.getAgent(cwd);
+    if (tracked?.agentId) {
+      // 已在会话管理中 → 直接绑定，更新状态卡 + 发送 last 卡片
+      const projects = await this.getProjects(true);
+      const curRef = await this.currentModelRef(tracked.agentId).catch(() => undefined);
+      const models = await this.getModelsCached();
+      await this.channel
+        .updateCard(evt.messageId, statusCard({ currentCwd: cwd, projects, currentModelRef: curRef, models }))
+        .catch(() => {});
+      // 已在会话管理中也要发送 last 卡片
+      const st = await this.client.getState(tracked.agentId).catch(() => null);
+      await this.sendContextSummary(evt.chatId, tracked.agentId, !!st?.running);
       return;
     }
 
-    // 第一步：获取 sid 和运行状态
-    const { sid, running } = (await this.resolveAgentId(cwd, chatId)) ?? {};
+    // 2. 不在会话管理中 → 寻找已有 agentId 纳入
+    const found = await this.findExistingAgent(cwd).catch(() => undefined);
+    if (!found) {
+      // 3. 未找到 → 更新项目列表让重新选择
+      const projects = await this.getProjects(true);
+      const models = await this.getModelsCached();
+      await this.channel
+        .updateCard(
+          evt.messageId,
+          statusCard({
+            currentCwd: undefined,
+            projects,
+            models,
+            notice: `⚠️ 项目「${projectLabel(cwd)}」暂无可用 agent，请从下方选择一个有历史会话的项目`,
+          }),
+        )
+        .catch(() => {});
+      return;
+    }
 
-    // 第二步：获取历史（如果 sid 无效，剔除缓存后重试一次）
+    // 4. 找到 → 纳入 + 绑定 + 发送 last 卡片
+    const projects = await this.getProjects(true);
+    const curRef = await this.currentModelRef(found.agentId).catch(() => undefined);
+    const models = await this.getModelsCached();
+    await this.channel
+      .updateCard(evt.messageId, statusCard({ currentCwd: cwd, projects, currentModelRef: curRef, models }))
+      .catch(() => {});
+    // 发送 last 卡片便于理解上下文（直接传 sid，避免重复 findExistingAgent）
+    await this.sendContextSummary(evt.chatId, found.agentId, found.running);
+  }
+
+  /** 获取 cwd 对应的 sid 和运行状态（不创建新 agent）。
+   *  通过 findExistingAgent 查找，失败则返回 undefined。
+   *  返回 { sid, running } 供调用方使用。 */
+  private async resolveAgentId(cwd: string, chatId: string): Promise<{ sid: string; running: boolean } | undefined> {
+    const found = await this.findExistingAgent(cwd).catch(() => undefined);
+    if (!found) return undefined;
+    return { sid: found.agentId, running: found.running };
+  }
+
+  /** 获取指定会话的最新一条文本（优先 assistant，其次 user 提问）。
+   *  如果获取不到历史记录 → 说明 sid 无效 → 清除缓存重新查找。
+   *  返回 { sid, running, text, modelRef }。 */
+  private async fetchLatestReply(
+    cwd: string,
+    sid?: string,
+    running?: boolean,
+  ): Promise<{ sid?: string; running?: boolean; text: string; modelRef?: string }> {
+    let currentSid = sid;
+    let currentRunning = running;
     let text = '';
-    let msgModelRef: string | undefined; // 消息本身的模型（agent 不活动时用这个）
-    if (sid) {
+    let modelRef: string | undefined;
+
+    for (let attempt = 0; attempt < 2 && !text; attempt++) {
+      if (!currentSid) break;
+      let msgs: import('../piweb/types.ts').Message[] = [];
+      let fetchError: unknown;
       try {
-        const msgs = (await this.client.getSessionContext(sid, 30)).context.messages;
-        log.info(`[sendContextSummary] sid=${sid.slice(-6)} msgs=${msgs.length}`);
+        msgs = (await this.client.getSessionContext(currentSid, 30)).context.messages;
+        log.info(`[fetchLatestReply] attempt=${attempt} sid=${currentSid.slice(-6)} msgs=${msgs.length}`);
+      } catch (e) {
+        fetchError = e;
+        log.warn(`[fetchLatestReply] attempt=${attempt} getSessionContext 失败：${String(e).slice(0, 100)}`);
+      }
+
+      // 获取不到历史记录（空或异常）→ sid 无效，清除缓存后重新查找
+      if (msgs.length === 0) {
+        if (attempt === 0) {
+          log.warn(`[fetchLatestReply] sid=${currentSid.slice(-6)} 无历史记录${fetchError ? '（异常）' : ''}，重新查找`);
+          this.registry.clearAgent(cwd);
+          const found = await this.findExistingAgent(cwd);
+          if (found && found.agentId !== currentSid) {
+            currentSid = found.agentId;
+            currentRunning = found.running;
+            continue; // 用新 sid 重试
+          }
+        }
+        break; // 找不到新的 sid，退出
+      }
+
+      // 优先找最后一条 assistant 文本
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        const m = msgs[i];
+        if (m.role !== 'assistant') continue;
+        const texts = m.content.filter((c) => c.type === 'text' && c.text);
+        if (texts.length) {
+          text = texts[texts.length - 1].text!;
+          const prov = typeof m.provider === 'string' ? m.provider : undefined;
+          const mdl = typeof m.model === 'string' ? m.model : undefined;
+          modelRef = prov && mdl ? `${prov}/${mdl}` : mdl;
+          break;
+        }
+      }
+      // 没有 assistant 回复 → 取最后一条 user 提问
+      if (!text) {
         for (let i = msgs.length - 1; i >= 0; i--) {
           const m = msgs[i];
-          if (m.role !== 'assistant') continue;
+          if (m.role !== 'user') continue;
           const texts = m.content.filter((c) => c.type === 'text' && c.text);
           if (texts.length) {
-            text = texts[texts.length - 1].text!;
-            // 记录消息本身的模型（agent 不活动时用）
-            const prov = typeof m.provider === 'string' ? m.provider : undefined;
-            const mdl = typeof m.model === 'string' ? m.model : undefined;
-            msgModelRef = prov && mdl ? `${prov}/${mdl}` : mdl;
+            text = `💭 提问：${texts[texts.length - 1].text!}`;
             break;
           }
         }
-        if (!text) {
-          log.warn(`[sendContextSummary] 没有找到 assistant 文本，最后消息角色=${msgs.length > 0 ? msgs[msgs.length - 1].role : 'N/A'}`);
-        }
-      } catch (e) {
-        log.warn(`[sendContextSummary] getSessionContext 失败：${String(e).slice(0, 100)}`);
-        // 剔除缓存的 sid，重新获取
-        this.registry.clearAgent(cwd);
-        const newResult = await this.resolveAgentId(cwd, chatId);
-        if (newResult) {
-          const newSid = newResult.sid;
-          try {
-            const msgs = (await this.client.getSessionContext(newSid, 30)).context.messages;
-            log.info(`[sendContextSummary] 重试 sid=${newSid.slice(-6)} msgs=${msgs.length}`);
-            for (let i = msgs.length - 1; i >= 0; i--) {
-              const m = msgs[i];
-              if (m.role !== 'assistant') continue;
-              const texts = m.content.filter((c) => c.type === 'text' && c.text);
-              if (texts.length) {
-                text = texts[texts.length - 1].text!;
-                const prov = typeof m.provider === 'string' ? m.provider : undefined;
-                const mdl = typeof m.model === 'string' ? m.model : undefined;
-                msgModelRef = prov && mdl ? `${prov}/${mdl}` : mdl;
-                break;
-              }
-            }
-          } catch (e2) {
-            log.warn(`[sendContextSummary] 重试也失败：${String(e2).slice(0, 100)}`);
-          }
-        }
+      }
+      if (!text) {
+        log.warn(`[fetchLatestReply] 消息数=${msgs.length} 但没有文本内容`);
       }
     }
 
-    // 无 sid 或无历史
-    if (!text) {
-      text = sid ? '（该会话暂无 assistant 文本回复）' : '（无记录）';
-    }
+    return { sid: currentSid, running: currentRunning, text, modelRef };
+  }
+
+  /** 切会话/切项目后补发「当前上下文摘要」—— 与 /last 共用卡片样式。 */
+  private async sendContextSummary(chatId: string, sid?: string, running?: boolean): Promise<void> {
+    const cwd = this.registry.projectOf(chatId);
+    if (!cwd) return;
+
+    // 获取最新回复（内部含「无效则重新查找」逻辑）
+    const r = await this.fetchLatestReply(cwd, sid, running);
+    const finalSid = r.sid;
+    const finalRunning = r.running;
+    const text = r.text || (finalSid ? '（无历史记录）' : '（无记录）');
+    const msgModelRef = r.modelRef;
 
     // 获取状态和模型信息
     const projects = await this.getProjects();
@@ -499,10 +540,10 @@ export class Bridge {
       : '?';
 
     let modelRef: string | undefined;
-    if (sid) {
-      const st = await this.client.getState(sid).catch(() => null);
+    if (finalSid) {
+      const st = await this.client.getState(finalSid).catch(() => null);
       // agent 有进程活动 → 用当前配置的模型
-      if (running) {
+      if (finalRunning || st?.running) {
         if (st?.state?.model) {
           modelRef = `${st.state.model.provider}/${st.state.model.id}`;
         }
@@ -514,8 +555,8 @@ export class Bridge {
 
     await this.channel
       .send(chatId, { card: lastReplyCard({ projectLabel: label, modelRef, state, text }) })
-      .then((r) => {
-        if (r?.messageId && sid) this.registry.rememberRoute(r.messageId, cwd, sid);
+      .then((r2) => {
+        if (r2?.messageId && finalSid) this.registry.rememberRoute(r2.messageId, cwd, finalSid);
       })
       .catch(() => {});
   }
@@ -531,25 +572,49 @@ export class Bridge {
     return cwd;
   }
 
-  /**
-   * 解析/创建 agent，三级策略（绝不无谓新建 session）：
-   *  1. registry 缓存 → 直接复用（最快，本地）
-   *  2. pi-web 活跃进程 → 采纳并缓存
-   *  3. 都没有 → POST /api/agent/new 创建
+  /** 查找已有 agent（不创建新 agent）。
+   *  优先级：pi-web 最近修改的 session（保证有历史消息）→ registry 缓存
+   *  返回 undefined 表示未找到任何已有 agent。 */
+  private async findExistingAgent(cwd: string): Promise<{ agentId: string; running: boolean } | undefined> {
+    // 1. 优先从 pi-web 获取该 cwd 的代表 session（最近修改的，保证有历史消息）
+    const projects = await this.getProjects(true);
+    const info = projects.find((p) => p.cwd === cwd);
+    if (info?.activeSessionId) {
+      const st = await this.client.getState(info.activeSessionId).catch(() => null);
+      if (st) {
+        // 采纳为会话管理中的 agent（覆盖 registry 中的错误缓存）
+        this.registry.adoptAgent(cwd, info.activeSessionId);
+        log.info(`采纳 agent ${info.activeSessionId} (cwd=${cwd}, running=${!!st.running})`);
+        return { agentId: info.activeSessionId, running: !!st.running };
+      }
+    }
+
+    // 2. pi-web 没有 → 查 registry 缓存（可能 pi-web 刚好没返回）
+    const tracked = this.registry.getAgent(cwd);
+    if (tracked?.agentId) {
+      const st = await this.client.getState(tracked.agentId).catch(() => null);
+      if (st) {
+        log.info(`复用 registry agent ${tracked.agentId.slice(-6)} (cwd=${cwd}, running=${!!st.running})`);
+        return { agentId: tracked.agentId, running: !!st.running };
+      }
+      // agentId 无效，清理
+      log.warn(`[findExistingAgent] registry 中的 agentId ${tracked.agentId.slice(-6)} 已无效，清理`);
+      this.registry.clearAgent(cwd);
+    }
+
+    return undefined;
+  }
+
+  /** 确保 agent 存在（用于消息处理流程，可以创建新 agent）。
+   *  1. findExistingAgent → 复用已有
+   *  2. 未找到 → POST /api/agent/new 创建
    */
   private async ensureAgent(cwd: string, chatId: string): Promise<string | undefined> {
-    // 1. 复用记录（最快，本地）
-    const tracked = this.registry.getAgent(cwd);
-    if (tracked?.agentId) return tracked.agentId;
-    // 2. 采纳活跃进程
-    const projects = await this.getProjects();
-    const info = projects.find((p) => p.cwd === cwd);
-    if (info?.activeSessionId && info.running) {
-      this.registry.adoptAgent(cwd, info.activeSessionId);
-      log.info(`采纳活跃 agent ${info.activeSessionId} (cwd=${cwd})`);
-      return info.activeSessionId;
-    }
-    // 3. 创建
+    // 1. 先查找已有 agent
+    const existing = await this.findExistingAgent(cwd).catch(() => undefined);
+    if (existing) return existing.agentId;
+
+    // 2. 未找到 → 创建新 agent（仅消息处理流程允许创建）
     try {
       const ensureCmd: Record<string, unknown> = { type: 'ensure_session' };
       if (this.deps.defaultModel) {
@@ -625,17 +690,13 @@ export class Bridge {
           await this.sendInfoCard(msg.chatId, `没找到「${rest}」，可换个关键词，或从下方下拉选：`);
           break;
         }
-        this.registry.bindProject(msg.chatId, cwd);
-        const projects = await this.getProjects(true);
-        const agent = this.registry.getAgent(cwd);
-        const curRef = agent?.agentId ? await this.currentModelRef(agent.agentId) : undefined;
-        const models = await this.getModelsCached();
-        await this.sendRouteCard(
-          msg.chatId,
-          statusCard({ currentCwd: cwd, projects, currentModelRef: curRef, models }),
-          cwd,
-          agent?.agentId,
-        );
+        // 触发卡片回调逻辑（复用 handleSwitch）
+        const fakeEvt: CardActionEvent = {
+          chatId: msg.chatId,
+          messageId: '',
+          action: { tag: 'select_static', option: `project:${cwd}`, value: { cmd: 'select' } },
+        } as CardActionEvent;
+        await this.handleSwitch(fakeEvt, cwd);
         break;
       }
       case 'abort': {
@@ -645,22 +706,25 @@ export class Bridge {
           await this.client.abort(agent.agentId).catch(() => {});
           await reply('⏹ 已请求停止');
         } else {
-          await reply('当前无活跃 agent');
+          await reply('已经移除的 Agent');
         }
         break;
       }
       case 'release': {
         const cwd = this.registry.projectOf(msg.chatId);
-        if (!cwd) return reply('当前无活跃 agent');
+        if (!cwd) return reply('已经移除的 Agent');
         const agent = this.registry.getAgent(cwd);
         if (agent?.agentId) {
-          // 仅解绑（不 abort）：同时解绑会话 → 下次消息会提示重新选择项目
+          // 清理路由记录 → 旧卡片回复不再生效
+          const clearedRoutes = this.registry.clearRoutesByAgent(agent.agentId);
+          log.info(`[release] 清理 ${clearedRoutes} 条路由记录 (agentId=${agent.agentId.slice(-6)})`);
+          // 从会话管理中移除 + 解绑会话（不 abort）
           this.registry.clearAgent(cwd);
           this.registry.unbindChat(msg.chatId);
           this.projectCache = undefined;
           await this.sendInfoCard(
             msg.chatId,
-            '✅ 已解绑（未打断任务）。回复旧卡片仍可用原会话；下次发消息请重新选择项目：',
+            '✅ 已解绑（未打断任务）。旧卡片回复已失效，下次发消息请重新选择项目：',
           );
         } else {
           // 项目本身已无 agent 记录，直接解绑会话
@@ -681,7 +745,7 @@ export class Bridge {
             const state = st?.running
               ? st.state?.isPromptRunning || st.state?.isStreaming
                 ? '🔴 运行中'
-                : '🟢 进程在'
+                : '🟢 空闲'
               : '⚪ 已回收';
             return { cwd: e.cwd, label: projectLabel(e.cwd), agentId: e.agentId, state };
           }),
@@ -698,21 +762,17 @@ export class Bridge {
       case 'last': {
         const cwd = this.registry.projectOf(msg.chatId);
         if (!cwd) {
-          // 与 /last 一致：引导用户去 /info 选项目（卡片比文本好点）
+          // 未绑定 → 引导用户去 /info 选项目
           await this.sendInfoCard(msg.chatId, '当前会话未绑定项目，请从下方「切换项目」下拉选一个：');
           return;
         }
-        const agent = this.registry.getAgent(cwd);
-        let sid = agent?.agentId;
-        if (!sid) {
-          // 退而求其次：用该项目最近的 session
-          const ps = await this.getProjects();
-          sid = ps.find((p) => p.cwd === cwd)?.activeSessionId;
-        }
-        if (!sid) {
+        // 通过 resolveAgentId 获取 sid + running（不创建新 agent）
+        const result = await this.resolveAgentId(cwd, msg.chatId);
+        if (!result) {
           await this.sendInfoCard(msg.chatId, '该项目暂无会话记录，可直接发一条消息让它开工：');
           return;
         }
+        const sid = result.sid;
         try {
           const st0 = await this.client.getState(sid).catch(() => null);
           const busy = !!st0?.running && !!(st0.state?.isPromptRunning || st0.state?.isStreaming);
@@ -727,25 +787,13 @@ export class Bridge {
             );
             return;
           }
-          const ctx = await this.client.getSessionContext(sid, 30);
-          const msgs = ctx.context.messages;
-          let lastText: string | undefined;
-          let modelRef: string | undefined;
-          for (let i = msgs.length - 1; i >= 0; i--) {
-            const m = msgs[i];
-            if (m.role !== 'assistant') continue;
-            const texts = m.content.filter((c) => c.type === 'text' && c.text);
-            if (texts.length) {
-              lastText = texts[texts.length - 1].text;
-              const prov = typeof m.provider === 'string' ? m.provider : undefined;
-              const mdl = typeof m.model === 'string' ? m.model : undefined;
-              modelRef = prov && mdl ? `${prov}/${mdl}` : mdl;
-              break;
-            }
-          }
-          if (!lastText) return reply('（该会话暂无 assistant 文本回复，可能都是工具调用）');
+          // 获取最新回复（内部含「无效则重新查找」逻辑）
+          const r = await this.fetchLatestReply(cwd, sid, result.running);
+          const finalSid = r.sid ?? sid;
+          const lastText = r.text || '（无历史记录）';
+          const modelRef = r.modelRef;
           // 当前 agent 状态（空闲 / 工作中 / 已回收）
-          const st = await this.client.getState(sid).catch(() => null);
+          const st = await this.client.getState(finalSid).catch(() => null);
           const state = st?.running
             ? st.state?.isPromptRunning || st.state?.isStreaming
               ? '🔴 工作中'
@@ -755,7 +803,7 @@ export class Bridge {
             msg.chatId,
             lastReplyCard({ projectLabel: projectLabel(cwd), modelRef, state, text: lastText }),
             cwd,
-            sid,
+            finalSid,
           );
         } catch (e) {
           await reply(`❌ 查询失败：${String(e).slice(0, 200)}`);
@@ -772,7 +820,7 @@ export class Bridge {
         const modelId = rest.slice(slash + 1);
         const cwd = this.registry.projectOf(msg.chatId);
         const agent = cwd ? this.registry.getAgent(cwd) : undefined;
-        if (!agent?.agentId) return reply('请先下发一条消息以创建 agent');
+        if (!agent?.agentId) return reply('已经移除的 Agent');
         await this.client
           .setModel(agent.agentId, provider, modelId)
           .catch((e) => void reply(`❌ ${String(e).slice(0, 200)}`));

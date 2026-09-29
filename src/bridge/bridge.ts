@@ -15,7 +15,6 @@ import {
   lastReplyCard,
   agentsCard,
   progressCard,
-  type TurnActions,
 } from '../feishu/cards.ts';
 import { logger } from '../log.ts';
 
@@ -248,12 +247,9 @@ export class Bridge {
     const agentId = await this.ensureAgent(project.cwd, msg.chatId);
     if (!agentId) return;
 
-    // 完成卡片只需 agentId（快速操作下拉已移到 /info）
-    const actions: TurnActions = { agentId };
-
     log.info(`chat=${msg.chatId.slice(-6)} project=${project.label} prompt=${text.length}字`);
     this.deps.queues.for(agentId).enqueue(() =>
-      this.executeTurn(msg.chatId, project.cwd, agentId, text, project.label, actions)
+      this.executeTurn(msg.chatId, project.cwd, agentId, text, project.label)
         .then((r) => {
           log.info(`turn 完成 status=${r.status} 文本=${r.text.length}字 ${r.durationMs}ms`);
           // 记录卡片 → agent 路由，供飞书回复定向
@@ -274,10 +270,9 @@ export class Bridge {
     agentId: string,
     text: string,
     label: string,
-    actions: TurnActions,
   ) {
     const runOnce = (aid: string) =>
-      runTurn(this.channel, this.client, chatId, aid, text, this.deps.pending, label, actions);
+      runTurn(this.channel, this.client, chatId, aid, text, this.deps.pending, label);
     try {
       return await runOnce(agentId);
     } catch (e) {

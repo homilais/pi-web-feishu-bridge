@@ -4,7 +4,7 @@ import type { PiWebClient } from '../piweb/client.ts';
 import { subscribeEvents, type SseSubscription } from '../piweb/events.ts';
 import type { PendingApprovals } from './queue.ts';
 import { TurnState } from './turn-state.ts';
-import { streamCard, type TurnActions } from '../feishu/cards.ts';
+import { streamCard } from '../feishu/cards.ts';
 import { logger } from '../log.ts';
 
 const log = logger('streamer');
@@ -28,7 +28,6 @@ export async function runTurn(
   prompt: string,
   pending: PendingApprovals,
   projectLabel: string,
-  actions?: TurnActions,
 ): Promise<RunTurnResult> {
   const turnId = crypto.randomUUID();
   const turn = new TurnState(turnId, prompt);
@@ -62,13 +61,13 @@ export async function runTurn(
               await sleep(450);
               const sig = turn.signature();
               if (sig !== lastSig) {
-                await ctl.update(streamCard(turn, projectLabel, actions)).catch((e) =>
+                await ctl.update(streamCard(turn, projectLabel)).catch((e) =>
                   log.warn('卡片更新失败', { e: String(e) }),
                 );
                 lastSig = sig;
               }
             }
-            await ctl.update(streamCard(turn, projectLabel, actions)).catch(() => {});
+            await ctl.update(streamCard(turn, projectLabel)).catch(() => {});
           },
         },
       },

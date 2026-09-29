@@ -301,9 +301,6 @@ export function agentsCard(
 }
 
 /** 任务卡片：运行中显示有序过程；终态用折叠面板收起过程、突出结果。 */
-export interface TurnActions {
-  agentId?: string;
-}
 
 /** 把 turn 的有序时间线转成元素（文字块 + 紧凑工具行）。 */
 function buildProcess(turn: TurnState): object[] {
@@ -333,7 +330,7 @@ function buildProcess(turn: TurnState): object[] {
   return els;
 }
 
-export function streamCard(turn: TurnState, projectLabel: string, actions?: TurnActions): object {
+export function streamCard(turn: TurnState, projectLabel: string): object {
   const elements: object[] = [];
   const icon = STATUS_ICON[turn.status] ?? '⏳';
   const sec = Math.max(1, Math.round((Date.now() - turn.startedAt) / 1000));
@@ -378,10 +375,6 @@ export function streamCard(turn: TurnState, projectLabel: string, actions?: Turn
       elements.push(hr());
       elements.push(collapsible(`查看过程（${toolCount} 次工具调用）`, proc, false));
     }
-  }
-
-  if (actions?.agentId) {
-    elements.push(hr(), md(`🆔 \`${actions.agentId}\``));
   }
 
   const template = turn.done

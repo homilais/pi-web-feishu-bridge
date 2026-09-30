@@ -41,6 +41,65 @@ pi SDK（@earendil-works/pi-coding-agent）
 
 ---
 
+## 🔺 从 0.1.x 升级到 0.2.0（升级前必读）
+
+0.2.0 引入**多机器人配置**，配置入口从 `.env` 改为 `config.yaml`。完整变更见 [`CHANGELOG.md`](./CHANGELOG.md)。
+
+### 先确认：你会不会受影响
+
+| 你的现状 | 升级后 |
+|---|---|
+| 只用 `.env` 配了单个飞书机器人，**没用** `PROJECTS` | ✅ 无影响，自动回退为单默认机器人，行为与 0.1.x 一致 |
+| 用了 `PROJECTS=cwd:label,...` 限制项目范围 | ⚠️ **该变量已废弃**，需迁到 `config.yaml` |
+| 想要多机器人按项目隔离 | ✅ 正是本版新增能力 |
+
+### 3 项破坏性变更
+
+1. **`PROJECTS` 环境变量废弃** — 项目来源改为：pi-web 枚举（默认机器人=全集）或 `config.yaml` 的 `bots[].cwds`（限定机器人）
+2. **`--init` 产出文件变了** — 从生成 `.env` 改为生成 `config.yaml`（带注释模板）
+3. **registry 文件命名变了** — `registry.json` → `registry.<botId>.json`（已做自动迁移，见下）
+
+> 另外 `AppConfig` 的 `lark` / `projects` 字段已移除，仅影响把本项目当库引用的场景。
+
+### 升级步骤
+
+```bash
+# 1. 装新版（0.x 的 minor 升级不会被 npm update 自动带上，需显式指定）
+npm i -g pi-web-feishu-bridge@0.2.0 --registry=https://registry.npmjs.org/
+
+# 2. 进工作目录
+cd ~/pi-bridge
+
+# 3a. 之前没用过 PROJECTS：什么都不用改，直接启动（自动回退单默认机器人）
+pi-web-feishu-bridge
+
+# 3b. 要用多机器人 / 或曾用过 PROJECTS：生成配置并填写
+pi-web-feishu-bridge --init     # 生成 config.yaml
+$EDITOR config.yaml             # 填 appId / appSecret / cwds
+PIWEB_PASSWORD=xxx pi-web-feishu-bridge
+```
+
+### 会话绑定不会丢
+
+默认机器人首次启动会自动把旧数据迁移过去，日志会打印：
+
+```
+[bot=default] 从旧 registry.json 迁移到 .../registry.default.json
+```
+
+已绑定过的项目**不需要重新选择**；旧 `registry.json` 保留不动，随时可回退。
+
+### ⚠️ 注意：把项目划给限定机器人会解绑它
+
+如果你把某个正在使用的项目声明给了**限定机器人**，默认机器人会在启动时清理掉它的绑定（日志：`pruneOutOfScope 清理 N 个范围外绑定`）。之后需要在**那个限定机器人**里发 `/info` 重新选择该项目 —— 历史消息不会丢（会从 pi-web 会话自动找回）。
+
+### 飞书侧别忘了配置新机器人
+
+新增限定机器人时，它在飞书开发者后台是一个**独立应用**，必须单独配好「长连接订阅方式 + 事件 + 回调 + 权限 + 发布版本」，否则会出现**连上了但发消息毫无反应**。
+逐项步骤与排错表见 **[docs/FEISHU-BOT-SETUP.md](./docs/FEISHU-BOT-SETUP.md)**。
+
+---
+
 ### 📦 从 npm 安装运行（推荐）
 
 #### 1. 安装 pi-web 基座
@@ -214,6 +273,7 @@ npm login                      # 首次需登录
 ```
 .
 ├── README.md          ← 本文件（入口）
+├── CHANGELOG.md       📋 版本变更记录（SemVer，含升级注意）
 ├── docs/              📖 实现文档：设计 / 使用 / 部署
 │   ├── README.md         项目介绍、架构、功能清单、代码结构、设计决策
 │   ├── FEISHU-BOT-SETUP.md 飞书机器人注册与配置（长连接/事件/权限/发布）

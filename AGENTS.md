@@ -153,6 +153,15 @@ log.error('异常', e);  // 完整错误
 2. 如需卡片，在 `cards.ts` 添加模板
 3. 测试：飞书发送指令
 
+### 发版前：更新 CHANGELOG
+
+`CHANGELOG.md` 按 [SemVer](https://semver.org/lang/zh-CN/) 维护，**顶部的 `[Unreleased]`/未发布段**累积本次要发的变更：
+
+1. 把未发布内容归入新版本号与日期（`## [x.y.z] - YYYY-MM-DD`）
+2. 分栏：新增 / 变更 / 修复 / 移除（**破坏性变更必须写进「移除/变更」并在 README 升级段说明**）
+3. 定级：只修bug→`patch`；向后兼容新功能→`minor`；有破坏性→`0.x` 阶段进 `minor`，`1.0+` 进 `major`
+4. 再跑 `./scripts/publish.sh <patch|minor|major>`
+
 ### 添加新卡片
 
 1. 在 `cards.ts` 定义模板函数

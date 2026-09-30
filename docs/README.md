@@ -6,7 +6,10 @@
 | 文档 | 内容 |
 |---|---|
 | [`README.md`](./README.md) | 项目介绍、架构设计、功能清单、目录结构（本文件） |
+| [`FEISHU-BOT-SETUP.md`](./FEISHU-BOT-SETUP.md) | **飞书机器人注册与配置**：长连接订阅方式 / 事件 / 回调 / 权限 / 发布，接入必读 |
 | [`USAGE.md`](./USAGE.md) | **使用手册**：指令一览、卡片一览、常见场景、排错 |
+| [`REQUIREMENTS.md`](./REQUIREMENTS.md) | 需求文档（含 §9 多机器人配置与 cwd 独占规则） |
+| [`DESIGN.md`](./DESIGN.md) | 详细设计、需求核对与实现状态 |
 | [`IMPLEMENTATION.md`](./IMPLEMENTATION.md) | 安装、配置、运行、验证、运维 |
 | [`PUBLISH.md`](./PUBLISH.md) | **发布到 npm**：package.json 改造、build 配置、发布流程、常见坑 |
 

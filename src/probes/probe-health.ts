@@ -37,17 +37,17 @@ try {
 
 // ── 2. 飞书应用凭据 ──────────────────────────────────────
 console.log(`\n[飞书]`);
-if (!cfg.lark.appId || !cfg.lark.appSecret) {
-  fail('LARK_APP_ID / LARK_APP_SECRET 未配置（见 .env）');
+if (!cfg.bots[0]?.appId || !cfg.bots[0]?.appSecret) {
+  fail('未配置任何机器人（config.yaml bots 为空或缺少 appId/appSecret）');
 } else {
   try {
     const sdk = await import('@larksuiteoapi/node-sdk');
-    const client = new sdk.Client({ appId: cfg.lark.appId, appSecret: cfg.lark.appSecret });
+    const client = new sdk.Client({ appId: cfg.bots[0].appId, appSecret: cfg.bots[0].appSecret });
     // urlPath 是 SDK 内部请求的实际字段（类型声明为 AxiosRequestConfig，故断言）
     await client.request(
       { method: 'GET', urlPath: '/open-apis/auth/v3/app_access_token/internal' } as never,
     );
-    console.log(`  ${OK} 应用凭据有效，可换取 token（${cfg.lark.appId.slice(0, 8)}…）`);
+    console.log(`  ${OK} 应用凭据有效，可换取 token（${cfg.bots[0].appId.slice(0, 8)}…）`);
   } catch (e) {
     fail(`飞书凭据无效：${String(e).slice(0, 120)}`);
     console.log(`       检查 App ID / App Secret 是否复制完整`);

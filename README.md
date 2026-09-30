@@ -67,46 +67,68 @@ pi-web-feishu-bridge --version
 pi-web-feishu-bridge --help
 ```
 
-#### 3. 配置密钥
+#### 3. 在飞书开放平台创建机器人
+
+本桥接靠飞书 **WebSocket 长连接** 收消息与卡片回调，因此应用必须在开发者后台配好。最小必需项：
+
+1. 创建**企业自建应用**，并添加**机器人**能力
+2. 事件与回调 → **订阅方式选「使用长连接」**（⚠️ 默认是「开发者服务器」，不改会**连上但收不到任何消息**）
+3. 添加事件 `im.message.receive_v1`、回调 `card.action.trigger`
+4. 权限管理开通 `im:message`（按需加 `im:chat` 等）
+5. **创建版本 → 发布**（⚠️ 上述改动不发布全都不生效）
+
+完整逐项说明、权限清单与故障排查表见 **[docs/FEISHU-BOT-SETUP.md](./docs/FEISHU-BOT-SETUP.md)**。
+
+> 要多机器人按项目隔离时，**每个机器人 = 一个独立飞书应用**，上述步骤逐个走完。
+
+#### 4. 配置
 
 ```bash
-# 建立工作目录（.env 与 registry.json 都写在这里）
+# 建立工作目录（config.yaml 与 registry.*.json 都写在这里）
 mkdir -p ~/pi-bridge && cd ~/pi-bridge
 
-# 生成 .env 模板
+# 生成 config.yaml 模板
 pi-web-feishu-bridge --init
 
-# 编辑填密钥
-$EDITOR .env
+# 编辑填飞书凭据与项目路径
+$EDITOR config.yaml
 ```
 
-必填 3 项：
+`config.yaml` 最小配置（单机器人，向后兼容也支持只配 `.env`）：
 
-```ini
-PIWEB_PASSWORD=your-pi-web-password   # pi-web 的 Basic Auth 密码
-LARK_APP_ID=cli_xxx                    # 飞书应用 App ID
-LARK_APP_SECRET=xxx                    # 飞书应用 App Secret
+```yaml
+piweb:
+  baseUrl: http://127.0.0.1:30141
+  password: ${PIWEB_PASSWORD}   # 引用环境变量，避免明文
+
+bots:
+  - id: default          # 默认机器人，可绑 pi-web 所有项目
+    appId: cli_xxx
+    appSecret: yyy
 ```
 
-其余配置（DEFAULT_MODEL / 白名单等）见 `--help` 输出或 [docs/IMPLEMENTATION.md](./docs/IMPLEMENTATION.md)。
+> 密码用 `${PIWEB_PASSWORD}` 引用环境变量：启动前 `export PIWEB_PASSWORD=你的密码`，或写进同目录 `.env`。
+>
+> 需要多个机器人按项目隔离时，在 `bots:` 下追加带 `cwds:` 的限定机器人（见 `docs/REQUIREMENTS.md` §9）。**一个 cwd 只能归属一个机器人。**
 
-#### 4. 启动
+#### 5. 启动
 
 ```bash
 # 终端 A：确认 pi-web 在跑（见 §1）
 
 # 终端 B：启动桥接
 cd ~/pi-bridge
-pi-web-feishu-bridge
+PIWEB_PASSWORD=你的密码 pi-web-feishu-bridge
 ```
 
 成功标志：日志出现 `Pi-Web 连接正常，运行中 agent N 个` 与 `✅ 桥接已就绪`。
 
-#### 5. 常用操作
+#### 6. 常用操作
 
 ```bash
-pi-web-feishu-bridge --env /path/to/.env   # 指定 .env 路径
-pi-web-feishu-bridge --cwd /some/dir       # 切目录后启动
+pi-web-feishu-bridge --config /path/to/config.yaml   # 指定配置文件
+pi-web-feishu-bridge --env /path/to/.env             # 指定 .env（供 ${PIWEB_PASSWORD} 等插值）
+pi-web-feishu-bridge --cwd /some/dir                 # 切目录后启动
 ```
 
 ---
@@ -126,11 +148,14 @@ cd pi-web-feishu-bridge
 npm install
 ```
 
-#### 3. 配置环境变量
+#### 3. 配置
 
 ```bash
-cp .env.example .env
-$EDITOR .env
+# 生成 config.yaml 模板（多机器人配置）
+node src/cli.ts --init
+$EDITOR config.yaml
+# pi-web 密码可写进 .env（供 ${PIWEB_PASSWORD} 插值）
+cp .env.example .env && $EDITOR .env
 ```
 
 #### 4. 启动（两个独立终端）
@@ -191,7 +216,10 @@ npm login                      # 首次需登录
 ├── README.md          ← 本文件（入口）
 ├── docs/              📖 实现文档：设计 / 使用 / 部署
 │   ├── README.md         项目介绍、架构、功能清单、代码结构、设计决策
+│   ├── FEISHU-BOT-SETUP.md 飞书机器人注册与配置（长连接/事件/权限/发布）
 │   ├── USAGE.md          使用手册（指令 / 卡片 / 场景 / 排错）
+│   ├── REQUIREMENTS.md   需求文档（含多机器人配置 §9）
+│   ├── DESIGN.md         详细设计与实现核对
 │   └── IMPLEMENTATION.md 安装、配置、运行、验证、运维
 ├── learning/          📚 调研与选型资料（本地保留，不入 git）
 │   ├── EVALUATION.md        三方案对齐 P0 打分 + 关键发现
@@ -201,7 +229,7 @@ npm login                      # 首次需登录
 │   ├── PIWEB-ON-PHONE.md    手机直访 pi-web 的 5 种方案
 │   └── plan-*.md            三份候选方案原始设计
 ├── src/               🛠 源码（bridge / feishu / piweb / probes）
-├── .env.example       配置模板
+├── .env.example       环境变量模板（PIWEB_PASSWORD 等）
 └── package.json
 ```
 

@@ -31,12 +31,17 @@
     "probe:feishu": "node --env-file-if-exists=.env src/probes/probe-feishu.ts",
     "probe:health": "node --env-file-if-exists=.env src/probes/probe-health.ts",
     "probe:piweb": "node --env-file-if-exists=.env src/probes/probe-piweb.ts",
-    "publish:dry-run": "bash scripts/publish.sh dry-run"
+    "publish:dry-run": "bash scripts/publish.sh dry-run",
+    "restart": "bash scripts/restart.sh",
+    "stop": "bash scripts/restart.sh --stop",
+    "logs": "bash scripts/restart.sh --logs"
   },
   "dependencies": {
-    "@larksuiteoapi/node-sdk": "^1.74.0"
+    "@larksuiteoapi/node-sdk": "^1.74.0",
+    "js-yaml": "^5.4.2"
   },
   "devDependencies": {
+    "@types/js-yaml": "^4.0.9",
     "@types/node": "^22.20.4",
     "typescript": "^5.9.3"
   },

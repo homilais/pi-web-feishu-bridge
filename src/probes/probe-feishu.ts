@@ -9,14 +9,15 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
-  if (!cfg.lark.appId || !cfg.lark.appSecret) {
-    log.error('LARK_APP_ID / LARK_APP_SECRET 未配置');
+  const bot = cfg.bots[0];
+  if (!bot || !bot.appId || !bot.appSecret) {
+    log.error('未配置任何机器人（config.yaml bots 为空或缺少 appId/appSecret）');
     process.exit(1);
   }
 
   const channel = createLarkChannel({
-    appId: cfg.lark.appId,
-    appSecret: cfg.lark.appSecret,
+    appId: bot.appId,
+    appSecret: bot.appSecret,
     transport: 'websocket',
     source: 'connect-probe',
     policy: { dmMode: 'open', requireMention: true },

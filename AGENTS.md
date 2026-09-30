@@ -12,17 +12,18 @@
 
 - **运行时**: Node.js >= 22（ESM，TypeScript 5.9）
 - **飞书 SDK**: `@larksuiteoapi/node-sdk` v1.59
+- **配置**: YAML（`js-yaml`）多机器人配置；无 config 文件时回退 .env
 - **pi-web API**: HTTP + SSE（Basic Auth，用户名固定 `pi`）
 - **构建**: `tsc -p tsconfig.build.json` → `dist/`
-- **开发**: `tsx watch src/cli.ts`（或 `node --watch --loader ts-node/esm`）
+- **开发**: `node --watch --env-file-if-exists=.env src/cli.ts`
 
 ## 目录结构
 
 ```
 src/
-├── cli.ts              # CLI 入口（参数解析、env 加载）
-├── config.ts           # 配置解析（.env、PROJECTS）
-├── index.ts            # 启动入口（组合各模块）
+├── cli.ts              # CLI 入口（--config/--init/--env/--cwd）
+├── config.ts           # 配置解析（YAML 多机器人 + .env 回退 + 校验）
+├── index.ts            # 启动入口（共享 client + 每机器人独立 channel/registry/bridge）
 ├── log.ts              # 结构化日志
 ├── bridge/
 │   ├── bridge.ts       # 核心桥接（消息路由、指令处理、卡片回调）
@@ -40,6 +41,21 @@ src/
 ```
 
 ## 核心流程
+
+### 多机器人架构（v3）
+
+配置见 `config.yaml`（`--init` 生成模板）。一个 cwd 只归属一个机器人（配置级独占）：
+
+| 机器人类型 | cwds | 可绑范围 |
+|---|---|---|
+| 默认（≤1） | 空 | pi-web 全集 − 所有限定机器人声明的 cwd |
+| 限定（≥0） | 1+ | 自身 cwds ∩ pi-web |
+
+- 启动：`loadConfig` 解析 YAML + 严格校验（id/appId 唯一、默认≤1、cwd 不重复）
+- 共享一个 `PiWebClient`；每机器人独立 `channel`/`registry`(`registry.<botId>.json`)/`bridge`
+- `Bridge.isCwdInScope()` 按配置级判断范围；`getProjects()` 仅返回本机器人可绑项目
+- `pruneOutOfScope()` 启动时清理范围外的旧绑定（配置变更后避免脏数据）
+- `/info` 下拉按可绑集合过滤，前置卡死，避免选了不能绑
 
 ### 消息处理
 
@@ -158,19 +174,63 @@ npm start            # 启动服务
 npm run probe:health # 健康检查探针
 ```
 
-## 环境变量
+## 配置
+
+主配置为 `config.yaml`（多机器人，`--init` 生成模板）。无 config 文件时回退到环境变量（单默认机器人，向后兼容）。YAML 中可用 `${PIWEB_PASSWORD}` 引用环境变量。
+
+### YAML 字段（`config.yaml`）
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `piweb.baseUrl` | ❌ | 默认 `http://127.0.0.1:30141` |
+| `piweb.password` | ✅ | Basic Auth 密码（可用 `${PIWEB_PASSWORD}` 插值） |
+| `bots[].id` | ✅ | 机器人唯一 id（slug，用于 registry 文件命名） |
+| `bots[].appId` / `appSecret` | ✅ | 飞书凭据（全局唯一） |
+| `bots[].cwds` | ❌ | cwd 列表；空/缺省=默认机器人（最多 1 个） |
+| `bots[].allowOpenIds` / `groupAllowlist` | ❌ | 私聊/群白名单 |
+
+### 环境变量（回退用）
 
 | 变量 | 必填 | 说明 |
 |---|---|---|
 | `PIWEB_PASSWORD` | ✅ | pi-web Basic Auth 密码 |
 | `PIWEB_BASE_URL` | ❌ | pi-web 地址（默认 `http://127.0.0.1:30141`） |
-| `LARK_APP_ID` | ✅ | 飞书应用 App ID |
-| `LARK_APP_SECRET` | ✅ | 飞书应用 App Secret |
-| `PROJECTS` | ❌ | 项目列表（`cwd:label,cwd:label`） |
+| `LARK_APP_ID` | ✅ | 飞书应用 App ID（回退模式） |
+| `LARK_APP_SECRET` | ✅ | 飞书应用 App Secret（回退模式） |
 | `DEFAULT_MODEL` | ❌ | 默认模型（`provider/modelId`） |
+
+## 服务重启（关键约束）
+
+> **用户是通过本桥接与 AI 助手对话的** —— 助手的输出要经 pi-web → bridge → 飞书。
+> 因此重启必须满足两条，否则通信直接中断、会话挂死：
+
+1. **绝不允许前台阻塞启动**（如直接跑 `npm start` / `node dist/cli.js`）——桥接是常驻进程，命令永不返回，会卡死整个工具调用。
+2. **停旧进程前必须先完成构建**，把断线窗口压到“停止→启动”几秒；构建失败则不碰旧进程。
+
+用现成脚本（内部已做 `nohup` + `disown` + 就绪探测）：
+
+```bash
+npm run restart    # 构建 → 停旧 → 后台起 → 等“桥接已就绪”
+npm run stop       # 只停
+npm run logs       # 看 bridge.log 尾部
+```
+
+手写时的正确方式：
+
+```bash
+npm run build                                  # 先构建（旧进程仍服务）
+pkill -f "dist/cli.js"; sleep 1                # 只精确匹配桥接
+nohup node --env-file-if-exists=.env dist/cli.js >>bridge.log 2>&1 &
+disown                                         # 脱离会话，不被 SIGHUP 带走
+```
+
+**绝对禁止的操乍**：`pkill node`、`pkill -f pi-web` 等宽匹配——pi-web（监听 30141）是**承载助手会话的进程**，杀了等于拆自己的线路，且不会自动恢复。
+
+重启后若用户说“没收到回复”，让 TA 发 `/last` 取回本轮结果（会话在 pi-web 侧，不随 bridge 重启丢失）。
 
 ## 参考文档
 
+- `docs/FEISHU-BOT-SETUP.md` — **飞书机器人注册与配置**（长连接订阅方式 / 事件 / 回调 / 权限 / 发布，接入必读）
 - `learning/PIWEB-CAPABILITIES.md` — pi-web 完整 API 手册
 - `learning/FEISHU-CHANNEL.md` — 飞书长连接与卡片协议
 - `learning/VERIFIED.md` — 实测验证记录
@@ -183,3 +243,5 @@ npm run probe:health # 健康检查探针
 4. **ESM 导入** — 文件间用 `.js` 后缀（编译后路径）
 5. **registry 持久化** — 修改后调用 `registry.persist()`
 6. **禁止自动提交/发布** — 改完代码不要直接 `git commit` 或 `npm publish`，必须向用户申请，获得明确允许后才操作
+7. **重启必须非阻塞** — 用户通过桥接与助手对话，改动需要重启时一律用 `npm run restart`（先构建、后台启动、不阻塞）；**切勿** `pkill node` / 杀 pi-web 进程
+8. **飞书应用配置** — 新建 bot 接入必须按 `docs/FEISHU-BOT-SETUP.md` 逐项走完；最常见故障是「订阅方式未选长连接」和「改动未发布版本」，两者都表现为**连上但收不到任何消息**（日志无 `onMessage`）

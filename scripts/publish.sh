@@ -29,9 +29,11 @@ echo "  包内容清单："
 tar tzf "$TARBALL" | sed 's/^/    /'
 
 # 敏感文件白名单检查
+# 说明：.env.example 是公开模板，属于允许项，需要先从拦截结果里排除。
 echo "  检查敏感文件是否混入包..."
-FORBIDDEN_RE='(^|/)(\.env$|registry\.json$|learning/|docs/|src/|\.log$|\.DS_Store$|\.git/)'
-BAD=$(tar tzf "$TARBALL" | grep -E "$FORBIDDEN_RE" || true)
+FORBIDDEN_RE='(^|/)(\.env|config\.(yaml|yml|json)$|registry([.-][a-zA-Z0-9_-]+)?\.json$|\.log$|\.log\.|learning/|docs/|src/|\.DS_Store$|\.git/)'
+ALLOW_RE='(\.env\.example|config\.(yaml|example)\.template)$'
+BAD=$(tar tzf "$TARBALL" | grep -E "$FORBIDDEN_RE" | grep -vE "$ALLOW_RE" || true)
 if [ -n "$BAD" ]; then
   echo "❌ 发现不应发布的文件："
   echo "$BAD"

@@ -60,7 +60,7 @@ npm run probe:health
   ✅ 会话文件 17 个，覆盖 5 个项目空间
   ✅ 模型 N 个
 [飞书]
-  ✅ 应用凭据有效，可换取 token（cli_aa3d…）
+  ✅ 应用凭据有效，可换取 token（cli_xxxx…）
 [本地进程]
   ✅ 桥接正在运行（pid 35455）
 ✅ 全部通过

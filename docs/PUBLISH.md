@@ -258,7 +258,7 @@ npm run prepublishOnly
 **方案 C：个人作用域**
 
 ```json
-"name": "@hebingjie/pi-web-feishu-bridge"
+"name": "@your-npm-username/pi-web-feishu-bridge"
 ```
 
 - 用你的 npm 用户名做 scope，免费

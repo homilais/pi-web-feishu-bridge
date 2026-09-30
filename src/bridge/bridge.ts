@@ -4,7 +4,6 @@ import type { LarkChannel, NormalizedMessage, CardActionEvent } from '@larksuite
 import type { PiWebClient } from '../piweb/client.ts';
 import type { Registry } from './registry.ts';
 import type { QueueMap, PendingApprovals } from './queue.ts';
-import type { ProjectConfig } from '../config.ts';
 import { projectLabel } from '../config.ts';
 import type { ProjectInfo, RpcCommand, ModelsEnabledResponse } from '../piweb/types.ts';
 import { PiWebHttpError } from '../piweb/client.ts';
@@ -26,8 +25,14 @@ export interface BridgeDeps {
   registry: Registry;
   queues: QueueMap;
   pending: PendingApprovals;
-  /** 静态项目种子（.env PROJECTS），运行时与 pi-web 枚举合并。 */
-  staticProjects: ProjectConfig[];
+  /** 本机器人 id（用于日志 / registry 文件命名）。 */
+  botId: string;
+  /** 是否为默认机器人（cwds 为空）。 */
+  isDefault: boolean;
+  /** 限定机器人声明的 cwd（已 resolve）；默认机器人为空数组。 */
+  declaredCwds: string[];
+  /** 全局所有限定机器人声明的 cwd 合集（供默认机器人排除）。 */
+  scopedCwdsGlobal: string[];
   defaultModel?: { provider: string; modelId: string };
   allowOpenIds: string[];
   groupAllowlist: string[];
@@ -40,6 +45,8 @@ export class Bridge {
 
   constructor(deps: BridgeDeps) {
     this.deps = deps;
+    // 启动时清理不属于本机器人范围的旧绑定（配置变更后避免脏数据）
+    this.pruneOutOfScope();
   }
 
   private get client() {
@@ -92,6 +99,32 @@ export class Bridge {
     return n;
   }
 
+  /** 判断 cwd 是否属于本机器人的配置范围（配置级，不含 pi-web 动态存在性）。
+   *  - 默认机器人：不在全局限定 cwd 合集中（即未被其他机器人声明）
+   *  - 限定机器人：在本机器人 declaredCwds 中 */
+  private isCwdInScope(cwd: string): boolean {
+    if (this.deps.isDefault) return !this.deps.scopedCwdsGlobal.includes(cwd);
+    return this.deps.declaredCwds.includes(cwd);
+  }
+
+  /** 启动时清理不属于本机器人范围的 registry 旧绑定（配置变更后避免脏数据）。
+   *  仅按配置级范围判断：默认机器人剔除被限定机器人声明的 cwd；
+   *  限定机器人剔除不在 declaredCwds 的 cwd。 */
+  private pruneOutOfScope(): void {
+    let n = 0;
+    for (const e of this.registry.agentEntries()) {
+      if (!this.isCwdInScope(e.cwd)) {
+        this.registry.clearAgent(e.cwd);
+        for (const c of this.registry.chatBindings()) {
+          if (c.cwd === e.cwd) this.registry.unbindChat(c.chatId);
+        }
+        n++;
+        log.info(`[bot=${this.deps.botId}] 清理范围外 agent cwd=${e.cwd.slice(-24)}`);
+      }
+    }
+    if (n) log.info(`[bot=${this.deps.botId}] pruneOutOfScope 清理 ${n} 个范围外绑定`);
+  }
+
   /** 发 /info 卡片。notice：卡片顶部提示条（与文本合并成一条消息）。 */
   private async sendInfoCard(chatId: string, notice?: string): Promise<void> {
     await this.pruneDeadAgents(); // 先清理已回收的再展示
@@ -117,22 +150,12 @@ export class Bridge {
     try {
       const enumerated = await this.client.listProjects();
       const map = new Map<string, ProjectInfo>();
-      for (const p of enumerated) map.set(p.cwd, p);
-      // 合并静态种子（可能 pi-web 里尚无会话）
-      for (const s of this.deps.staticProjects) {
-        if (!map.has(s.cwd)) {
-          map.set(s.cwd, {
-            cwd: s.cwd,
-            label: s.label,
-            slug: s.id,
-            sessionCount: 0,
-            hasAgent: false,
-            running: false,
-            busy: false,
-          });
-        }
+      for (const p of enumerated) {
+        // 按本机器人范围过滤：默认机器人排除限定机器人声明的 cwd；限定机器人只留 declaredCwds
+        if (!this.isCwdInScope(p.cwd)) continue;
+        map.set(p.cwd, p);
       }
-      // 回填桥接记录过的 agent
+      // 回填桥接记录过的 agent（范围外的已在 pruneOutOfScope 清理）
       for (const a of this.registry.agentEntries()) {
         const p = map.get(a.cwd);
         if (p) {
@@ -152,13 +175,15 @@ export class Bridge {
       }
       return arr;
     } catch (e) {
-      log.warn('枚举项目失败，回退到静态种子', { e: String(e).slice(0, 120) });
-      return this.deps.staticProjects.map((s) => ({
-        cwd: s.cwd,
-        label: s.label,
-        slug: s.id,
+      log.warn('枚举项目失败，回退到 declaredCwds', { e: String(e).slice(0, 120) });
+      // 降级：限定机器人返回 declaredCwds 桩；默认机器人返回空（无 pi-web 无法枚举全集）
+      if (this.deps.isDefault) return [];
+      return this.deps.declaredCwds.map((cwd) => ({
+        cwd,
+        label: projectLabel(cwd),
+        slug: '',
         sessionCount: 0,
-        hasAgent: !!this.registry.getAgent(s.cwd),
+        hasAgent: !!this.registry.getAgent(cwd),
         running: false,
         busy: false,
       }));
@@ -376,6 +401,14 @@ export class Bridge {
    *  3. 未找到 → 更新项目列表让重新选择
    *  4. 找到 → 纳入 + 绑定 + 发送 last 卡片 */
   private async handleSwitch(evt: CardActionEvent, cwd: string): Promise<void> {
+    // 防御性范围校验：配置级不允许的 cwd 拒绝绑定（下拉已过滤，这里防越界）
+    if (!this.isCwdInScope(cwd)) {
+      await this.sendErr(
+        evt.chatId,
+        `⚠️ 项目「${projectLabel(cwd)}」不在机器人 ${this.deps.botId} 的可绑定范围内`,
+      );
+      return;
+    }
     this.registry.bindProject(evt.chatId, cwd);
     this.projectCache = undefined; // 强制刷新状态
 
@@ -557,14 +590,8 @@ export class Bridge {
   }
 
   private ensureBinding(chatId: string): string {
-    // 当前会话绑定的项目 cwd；无则取第一个静态种子
-    let cwd = this.registry.projectOf(chatId);
-    if (!cwd) {
-      const seed = this.deps.staticProjects[0];
-      cwd = seed?.cwd ?? '';
-      if (cwd) this.registry.bindProject(chatId, cwd);
-    }
-    return cwd;
+    // 当前会话绑定的项目 cwd；无则返回空（由调用方发 /info 提示选择）
+    return this.registry.projectOf(chatId) ?? '';
   }
 
   /** 查找已有 agent（不创建新 agent）。

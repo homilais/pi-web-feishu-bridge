@@ -9,8 +9,19 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
-  const project = cfg.projects[0];
   const client = new PiWebClient(cfg.piwebBaseUrl, cfg.piwebPassword);
+
+  // 取第一个可用 cwd：优先限定机器人的 declaredCwds，否则查 pi-web 项目列表
+  let cwd = cfg.bots.find((b) => b.cwds.length)?.cwds[0];
+  if (!cwd) {
+    const ps = await client.listProjects().catch(() => []);
+    cwd = ps[0]?.cwd;
+  }
+  if (!cwd) {
+    console.error('[probe] 无可用 cwd（未配置限定机器人且 pi-web 无项目）');
+    process.exit(1);
+  }
+  const project = { cwd, label: cwd.split('/').filter(Boolean).pop() ?? cwd };
 
   console.log(`[probe] pi-web @ ${cfg.piwebBaseUrl}`);
   console.log(`[probe] project=${project.label} cwd=${project.cwd}`);

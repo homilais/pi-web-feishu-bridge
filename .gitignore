@@ -8,8 +8,14 @@ dist/
 .env.*
 !.env.example
 
+# ── 多机器人配置文件（含凭据，不入库）────────────────────
+config.yaml
+config.yml
+config.json
+
 # ── 运行时状态 / 缓存 ──────────────────────────────────────
 registry.json
+registry.*.json
 *.log
 *.log.*
 npm-debug.log*

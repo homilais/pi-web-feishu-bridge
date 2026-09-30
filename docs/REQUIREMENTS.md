@@ -253,3 +253,147 @@
 - `src/feishu/cards.ts` — 卡片模板
 - `src/piweb/client.ts` — pi-web 客户端封装
 - `learning/PIWEB-CAPABILITIES.md` — pi-web API 手册
+
+---
+
+## 九、变更记录
+
+### 2026-09-29　多机器人配置（多 Bot 配置）
+
+#### 9.1 目标与背景
+
+现有架构只支持**单个飞书机器人**，绑定 pi-web 中全部 cwd。本次升级支持**多个飞书机器人**，每个机器人按配置限定可绑定的 cwd 范围，实现「不同项目路径由不同机器人服务、互不干扰」。
+
+关键约束：**一个 cwd 只允许被一个机器人绑定**（配置级独占，非运行时抢占）。
+
+#### 9.2 配置文件格式（YAML）
+
+采用 YAML 配置文件（新增依赖 `js-yaml`），默认路径 `./config.yaml`，可用 CLI `--config <path>` 指定。支持 `${ENV_VAR}` 插值（用于把密码等敏感值从环境变量引入，避免明文）。
+
+```yaml
+# config.yaml（须加入 .gitignore，不提交）
+piweb:
+  baseUrl: http://127.0.0.1:30141
+  password: ${PIWEB_PASSWORD}   # 引用环境变量
+
+defaultModel: anthropic/claude-sonnet   # 可选，原 DEFAULT_MODEL
+
+bots:
+  - id: default          # 默认机器人：不写 cwds（或空数组）
+    appId: cli_xxx
+    appSecret: yyy
+    # allowOpenIds: [ou_xxx]        # 可选：私聊白名单（open_id）
+    # groupAllowlist: [oc_xxx]      # 可选：群白名单（chat_id）
+  - id: alpha
+    appId: cli_aaa
+    appSecret: bbb
+    cwds:
+      - /Users/you/project/alpha
+  - id: docs
+    appId: cli_ccc
+    appSecret: ddd
+    cwds:
+      - /path/a
+      - /path/b
+    groupAllowlist: [oc_xxx]
+```
+
+**字段说明：**
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `piweb.baseUrl` | ❌ | pi-web 地址，默认 `http://127.0.0.1:30141` |
+| `piweb.password` | ✅ | pi-web Basic Auth 密码；可用 `${PIWEB_PASSWORD}` 插值 |
+| `defaultModel` | ❌ | 默认模型 `provider/modelId` |
+| `bots[].id` | ✅ | 机器人唯一标识（slug），用于 registry 文件命名与日志 |
+| `bots[].appId` | ✅ | 飞书 App ID |
+| `bots[].appSecret` | ✅ | 飞书 App Secret |
+| `bots[].cwds` | ❌ | 该机器人绑定的 cwd 列表。**缺省或空数组 = 默认机器人** |
+| `bots[].allowOpenIds` | ❌ | 私聊白名单；空 = 开放 |
+| `bots[].groupAllowlist` | ❌ | 群白名单；空 = 任意群 |
+
+#### 9.3 机器人分类
+
+| 类型 | 判定 | 数量限制 | 可绑定的 cwd |
+|---|---|---|---|
+| **默认机器人** | `cwds` 缺省或为空数组 | **最多 1 个**（可没有） | pi-web 全集 **减去**所有限定机器人声明的 cwd |
+| **限定机器人** | `cwds` 非空（≥1） | 无上限 | 自身 `cwds` **∩** pi-web 已有 cwd |
+
+- 默认机器人**不是必须**的；可以全是限定机器人。
+- 不允许出现 2 个及以上默认机器人（`cwds` 为空的 bot），启动报错退出。
+
+#### 9.4 cwd 独占规则（核心约束）
+
+1. **一个 cwd 只归属一个机器人**：任何 cwd 在所有 bot 的 `cwds` 合集中**只能出现一次**。
+2. **配置级生效，非运行时**：只要某 cwd 被写进某限定机器人的 `cwds`，其他机器人（含默认）就**永远不能绑定**它——不论它是否已被实际绑定。即排除在配置声明时完成，不依赖运行时状态。
+3. **默认机器人的可绑集合**自动排除所有限定机器人声明的 cwd（差集），无需为默认机器人显式排除。
+
+#### 9.5 可绑 cwd 的动态计算
+
+可绑 cwd =（该机器人的声明集合）∩（pi-web 当前已有 cwd）。**每次 `/info` 实时计算**（因 pi-web 的 cwd 集合会随会话创建/删除变化）。
+
+- 限定机器人声明了某 cwd 但 pi-web 暂无该会话 → 该 cwd **不可绑**，且**不在 `/info` 下拉中显示**（完全隐藏，不标灰）。等 pi-web 出现该 cwd 后自动生效、自动出现。
+- pi-web 中存在但未被任何机器人声明的 cwd → **只有默认机器人**能绑定（在其 `/info` 显示）。若无默认机器人，则该 cwd 无人可绑。
+
+#### 9.6 `/info` 下拉限制（前置卡死）
+
+绑定限制必须**从 `/info` 项目下拉列表就限定好**，避免用户选了之后才发现不能绑：
+
+- 默认机器人 `/info` 下拉：pi-web 全集 **−** 所有限定机器人声明的 cwd。
+- 限定机器人 `/info` 下拉：仅自身 `cwds` ∩ pi-web。
+- 切换项目时若目标 cwd 不在该机器人可绑集合内 → 拒绝（理论上不会发生，因为下拉已过滤；作为防御性校验）。
+
+`/switch`、`/agents`、`/last` 等指令同样只看本机器人的可绑 cwd，**完全隔离**，不出现其他机器人的 cwd。
+
+#### 9.7 数据隔离
+
+每个机器人独立持有，互不影响（多个机器人在同一个群里各自工作）：
+
+| 组件 | 隔离方式 |
+|---|---|
+| Feishu Channel | 每 bot 一个（独立 WS 长连接） |
+| Bridge | 每 bot 一个 |
+| Registry | 每 bot 一个文件 `registry.<botId>.json`（chatId↔cwd、cwd↔agentId、消息路由均按 bot 隔离） |
+| QueueMap / PendingApprovals | 每 bot 一份 |
+| **PiWebClient** | **全局共享一个**（所有 bot 连同一个 pi-web） |
+
+#### 9.8 配置校验与启动行为
+
+启动时（`loadConfig`）严格校验，**任一不通过即报错并退出进程**（fail fast，不留隐式降级）：
+
+1. 至少配置 1 个 bot。
+2. 默认机器人（`cwds` 为空/缺省）≤ 1 个。
+3. `bots[].id` 全局唯一。
+4. `bots[].appId` 全局唯一（同一飞书 App 不允许建两个连接）。
+5. `bots[].appId` / `appSecret` 非空。
+6. 所有限定机器人的 `cwds` 合并后**无重复**（即一个 cwd 不出现在两个 bot 中）。重复 → 报错，提示「cwd `X` 在 bot `A` 和 bot `B` 中重复，请修改配置」。
+7. `cwd` 路径规范化（`resolve`）后再比对，避免尾部 `/` 等差异造成漏判。
+8. `piweb.password` 必须可解析（`${ENV}` 插值后非空）。
+9. pi-web 不可连接 → 退出（沿用现有行为）。
+
+> 注：配置了但 pi-web 暂不存在的 cwd **不算**校验失败——仅在运行时 `/info` 中隐藏，等 pi-web 出现后自动生效。
+
+#### 9.9 向后兼容
+
+- 若不存在 `config.yaml` / `config.json`，但 `.env` 中有 `LARK_APP_ID` + `LARK_APP_SECRET` → 视为单默认机器人（旧用法），保持现有行为。
+- 同时存在 `config.yaml` 与 `.env` 中的 LARK_* 时，以 `config.yaml` 为准。
+- `PIWEB_PASSWORD` / `PIWEB_BASE_URL` / `DEFAULT_MODEL` 仍可从 `.env` 读，作为未提供 config 文件时的回退。
+
+#### 9.10 CLI
+
+- 新增 `--config <path>`：指定配置文件路径（默认 `./config.yaml`，其次 `./config.json`）。
+- `--init`：在当前目录生成示例 `config.yaml`（含注释模板）。
+- 其余 flag（`--cwd`、`--env`、`--help`、`--version`）不变。
+
+#### 9.11 影响范围（待开发模块）
+
+| 模块 | 改动 |
+|---|---|
+| `src/config.ts` | 重写：解析 YAML（加 `js-yaml`），多 bot 结构，`${ENV}` 插值，全部校验 |
+| `src/index.ts` | 改为遍历 bots：共享 client，每 bot 建 channel/registry/queues/bridge 并启动 |
+| `src/bridge/bridge.ts` | `getProjects()` 按 bot 可绑集合过滤；`/info`、`/switch`、`/agents`、`/last` 均限制在本 bot 范围 |
+| `src/bridge/registry.ts` | 支持按 botId 命名持久化文件（`registry.<botId>.json`） |
+| `src/cli.ts` | 新增 `--config`、`--init` 生成示例 yaml |
+| `src/feishu/cards.ts` | 无结构变化（项目列表已是参数化），仅数据源受限 |
+| `package.json` | 新增依赖 `js-yaml` 及其 `@types/js-yaml` |
+| `.gitignore` | 新增 `config.yaml`、`config.json` |

@@ -86,7 +86,7 @@ Nightmanager implementation queue.
 
 - [ready] T6 审批双通道（终端与飞书可同时批准，先响应者胜）
   - Spec: `specs/terminal-bot.md`
-  - Blocked by: T4 飞书发起回合的流式卡片
+  - Blocked by: None — T4 已完成（`a9b59c9`）
   - Scope: 飞书发起的回合需批准时，终端与飞书同时呈现审批，任一侧响应后另一侧消失；用户在终端发起的回合，飞书不可见也不可代批。
   - Acceptance:
     - 飞书发起且需批准的回合，终端与飞书同时出现审批
@@ -99,7 +99,7 @@ Nightmanager implementation queue.
 
 - [ready] T7 生命周期韧性：断线标记、超时移除、重连状态重取
   - Spec: `specs/terminal-bot.md`
-  - Blocked by: T4 飞书发起回合的流式卡片
+  - Blocked by: None — T4 已完成（`a9b59c9`）
   - Scope: 终端会话在连接异常与恢复时的表现可预期：短暂断线保留为离线、超时移除、恢复后状态正确。
   - Acceptance:
     - 扩展连接断开后列表该项标记为离线并保留

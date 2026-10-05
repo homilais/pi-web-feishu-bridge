@@ -320,13 +320,24 @@ export class Bridge {
   private async runTerminalTurn(chatId: string, cwd: string, text: string): Promise<void> {
     const terminal = this.deps.terminal;
     if (!terminal) return;
-    // cwd 对应的终端会话：取最近注册且在线的那一个
-    const sessions = terminal.listSessions().filter((e) => e.info.cwd === cwd && e.online);
-    if (!sessions.length) {
-      await this.sendErr(chatId, `⚠️ 没有在线的终端会话（cwd=${cwd}），请先在终端启动 pi`);
-      return;
+    // 优先用 /switch 绑定的 sessionId（同 cwd 可多终端，不能靠 cwd 猜）
+    const bound = terminal.boundSession(chatId);
+    let entry = bound
+      ? terminal.listSessions().find((e) => e.info.sessionId === bound)
+      : undefined;
+    if (!entry) {
+      // 未绑定：取该 cwd 下最近注册且在线的会话
+      const sessions = terminal.listSessions().filter((e) => e.info.cwd === cwd && e.online);
+      if (!sessions.length) {
+        await this.sendErr(
+          chatId,
+          `⚠️ 没有在线的终端会话（cwd=${cwd}），请先在终端启动 pi，或用 /switch 选择`,
+        );
+        return;
+      }
+      entry = sessions[sessions.length - 1];
+      terminal.bindChat(chatId, entry.info.sessionId);
     }
-    const entry = sessions[sessions.length - 1];
     const sessionId = entry.info.sessionId;
     const label = entry.info.label ?? projectLabel(cwd);
 
@@ -792,6 +803,37 @@ export class Bridge {
         break;
       }
       case 'switch': {
+        // 终端感知：/switch = 在**终端进程之间**切换（不去重，同 cwd 可多个）
+        if (this.deps.terminal) {
+          const t = this.deps.terminal;
+          const all = t.listSessions();
+          if (!all.length) {
+            await reply('还没有终端会话。请先在终端运行 pi。');
+            break;
+          }
+          const target = rest
+            ? all.find(
+                (e) =>
+                  e.info.sessionId === rest ||
+                  (e.info.label ?? '').includes(rest) ||
+                  String(e.info.pid) === rest,
+              )
+            : undefined;
+          if (rest && !target) {
+            const list = all
+              .map((e) => `${e.info.label ?? '?'}(pid ${e.info.pid})${e.online ? '' : ' [离线]'}`)
+              .join('、');
+            await reply(`没找到终端会话「${rest}」。已知会话：${list}`);
+            break;
+          }
+          const chosen = target ?? all[all.length - 1];
+          t.bindChat(msg.chatId, chosen.info.sessionId);
+          this.registry.bindProject(msg.chatId, chosen.info.cwd);
+          await reply(
+            `✅ 已切换到终端会话 ${chosen.info.label ?? '?'}（pid ${chosen.info.pid}）${chosen.online ? '' : ' ⚠️ 该会话当前离线'}`,
+          );
+          break;
+        }
         // 无参不做特判，统一落到「未知指令」→ help 卡
         if (!rest) return replyCard(this.helpCard());
         const cwd = await this.resolveCwd(rest);
@@ -809,6 +851,17 @@ export class Bridge {
         break;
       }
       case 'abort': {
+        // 终端会话：飞书可中止**任何**回合（含用户在终端发起的）—— 中止是收回控制权
+        if (this.deps.terminal) {
+          const sid = this.deps.terminal.boundSession(msg.chatId);
+          if (!sid) return reply('当前会话未绑定终端 pi，请先 /switch 选择');
+          const ok = this.deps.terminal.dispatch(sid, {
+            type: 'abort',
+            requestId: crypto.randomUUID(),
+          });
+          await reply(ok ? '⏹ 已请求停止' : '❌ 终端会话已离线，无法停止');
+          break;
+        }
         const cwd = this.registry.projectOf(msg.chatId);
         const agent = cwd ? this.registry.getAgent(cwd) : undefined;
         if (agent?.agentId) {
@@ -881,6 +934,30 @@ export class Bridge {
         break;
       }
       case 'last': {
+        // 终端会话：拉取真实会话历史（不区分后端，不过滤 —— 含用户终端发起的回合）
+        if (this.deps.terminal) {
+          const t = this.deps.terminal;
+          const sid = t.boundSession(msg.chatId);
+          if (!sid) return reply('当前会话未绑定终端 pi，请先 /switch 选择');
+          const entry = t.listSessions().find((e) => e.info.sessionId === sid);
+          const res = await t.request(sid, { type: 'pullState', requestId: crypto.randomUUID() });
+          if (!res) return reply('❌ 终端会话无响应（可能已离线），请稍后重试');
+          const text = latestAssistantText(res.entries);
+          const label = entry?.info.label ?? projectLabel(entry?.info.cwd ?? '');
+          const state = res.idle ? '🟢 空闲' : '🔴 工作中';
+          await this.sendRouteCard(
+            msg.chatId,
+            lastReplyCard({
+              projectLabel: label,
+              modelRef: res.model,
+              state,
+              text: text || '（暂无文本回复）',
+            }),
+            entry?.info.cwd,
+            sid,
+          );
+          break;
+        }
         const cwd = this.registry.projectOf(msg.chatId);
         if (!cwd) {
           // 未绑定 → 引导用户去 /info 选项目
@@ -956,6 +1033,24 @@ export class Bridge {
         break;
       }
       case 'model': {
+        // 终端会话：切换该 pi 会话的模型
+        if (this.deps.terminal) {
+          if (!rest) return reply('格式：/model provider/modelId');
+          const slash = rest.indexOf('/');
+          if (slash <= 0) return reply('格式：/model provider/modelId');
+          const provider = rest.slice(0, slash);
+          const modelId = rest.slice(slash + 1);
+          const sid = this.deps.terminal.boundSession(msg.chatId);
+          if (!sid) return reply('当前会话未绑定终端 pi，请先 /switch 选择');
+          const res = await this.deps.terminal.request(sid, {
+            type: 'setModel',
+            requestId: crypto.randomUUID(),
+            provider,
+            modelId,
+          });
+          if (!res) return reply('❌ 终端会话无响应（可能已离线）');
+          return reply(res.ok ? `✅ 已切换模型为 ${rest}` : `❌ 切换失败：${res.error ?? '未知错误'}`);
+        }
         // 模型选择已合并到 /info；这里仅支持 /model provider/modelId 直接切
         // 无参不做特判，统一落到「未知指令」→ help 卡
         if (!rest) return replyCard(this.helpCard());
@@ -976,4 +1071,33 @@ export class Bridge {
         await replyCard(this.helpCard());
     }
   }
+}
+
+/** 从 pi 会话条目里取最后一条文本（assistant 优先，其次 user 提问）。
+ *  **不做过滤** —— 按 D2/D4，/last 显示全部，含用户在终端自己发起的回合。 */
+function latestAssistantText(entries: unknown[] | undefined): string {
+  const list = (entries ?? []) as Array<{
+    type?: string;
+    message?: { role?: string; content?: Array<{ type?: string; text?: string }> };
+  }>;
+  const textsOf = (e: (typeof list)[number]): string =>
+    (e.message?.content ?? [])
+      .filter((c) => c.type === 'text' && c.text)
+      .map((c) => c.text ?? '')
+      .join('');
+  for (let i = list.length - 1; i >= 0; i--) {
+    const e = list[i];
+    if (e.message?.role === 'assistant') {
+      const t = textsOf(e);
+      if (t.trim()) return t;
+    }
+  }
+  for (let i = list.length - 1; i >= 0; i--) {
+    const e = list[i];
+    if (e.message?.role === 'user') {
+      const t = textsOf(e);
+      if (t.trim()) return `💭 提问：${t}`;
+    }
+  }
+  return '';
 }

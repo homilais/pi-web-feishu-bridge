@@ -24,7 +24,9 @@ export type TerminalCommand =
   | { type: 'prompt'; requestId: string; text: string }
   | { type: 'abort'; requestId: string }
   | { type: 'setModel'; requestId: string; provider: string; modelId: string }
-  | { type: 'pullState'; requestId: string };
+  | { type: 'pullState'; requestId: string }
+  /** 取消审批（发给扩展，转发给 pi 的审批通道）。 */
+  | { type: 'resolveApproval'; requestId: string; approved: boolean };
 
 /** 扩展 → 桥接 的上行批次。
  *  events 为一串 pi 事件，形状与桥接侧 TurnState 消费的一致（见 piweb/types.ts）。 */
@@ -45,6 +47,20 @@ export interface TerminalRegistryEntry {
   online: boolean;
   /** 最近一次已知运行态。 */
   busy: boolean;
+}
+
+/** 扩展 → 桥接 的响应（对应 requestId，用于 pullState 等请求-响应）。 */
+export interface TerminalResponse {
+  sessionId: string;
+  requestId: string;
+  /** 会话历史条目（原样透出，由桥接解读）。 */
+  entries?: unknown[];
+  /** 当前模型 ref。 */
+  model?: string;
+  /** 是否空闲。 */
+  idle?: boolean;
+  ok?: boolean;
+  error?: string;
 }
 
 /** 发现文件：扩展据此定位桥接的监听端口。 */

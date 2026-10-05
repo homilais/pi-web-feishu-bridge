@@ -51,6 +51,15 @@ function coalesce(events: PiEvent[]): PiEvent[] {
   return out;
 }
 
+/** 把请求响应回传给桥接（pullState / setModel）。 */
+function respond(base: string, sessionId: string, requestId: string, payload: Record<string, unknown>): void {
+  void fetch(`${base}/terminal/respond`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId, requestId, ...payload }),
+  }).catch(() => {});
+}
+
 /** 桥接在不在？读发现文件 + 校验 pid 存活 + 端口可连。 */
 async function probeBridge(): Promise<number | null> {
   try {
@@ -87,7 +96,8 @@ export default function (pi: ExtensionAPI): void {
     const base = `http://127.0.0.1:${port}`;
     const sessionId = ctx.sessionManager.getSessionId();
     const cwd = ctx.sessionManager.getCwd();
-    const modelRef = ctx.model ? `${ctx.model.provider ?? ''}/${ctx.model.id}`.replace(/^\//, '') : undefined;
+    const currentModelRef = (): string | undefined =>
+      ctx.model ? `${ctx.model.provider ?? ''}/${ctx.model.id}`.replace(/^\//, '') : undefined;
 
     // 1. 注册会话
     try {
@@ -98,7 +108,7 @@ export default function (pi: ExtensionAPI): void {
           sessionId,
           cwd,
           label: cwd.split('/').filter(Boolean).pop(),
-          model: modelRef,
+          model: currentModelRef(),
           pid: process.pid,
           version: '0.1',
         }),
@@ -148,8 +158,26 @@ export default function (pi: ExtensionAPI): void {
                 // followUp：排队，不插队当前轮（与 pi-web 后端一致）
                 remoteTurn = true;
                 await pi.sendUserMessage(cmd.text, { deliverAs: 'followUp' });
+              } else if (cmd.type === 'abort') {
+                // T5：中止 —— 飞书可中止任何回合（含用户在终端发起的）
+                ctx.abort?.();
+              } else if (cmd.type === 'setModel' && cmd.provider && cmd.modelId) {
+                try {
+                  await ctx.setModel?.(cmd.provider, cmd.modelId);
+                  respond(base, sessionId, cmd.requestId, { ok: true });
+                } catch (e) {
+                  respond(base, sessionId, cmd.requestId, { ok: false, error: String(e).slice(0, 120) });
+                }
+              } else if (cmd.type === 'pullState') {
+                // T5：/last 所需的真实会话历史 + 当前模型 + 空闲态
+                const entries = ctx.sessionManager.getEntries();
+                respond(base, sessionId, cmd.requestId, {
+                  ok: true,
+                  entries: entries as unknown[],
+                  model: currentModelRef(),
+                  idle: ctx.isIdle(),
+                });
               }
-              // T5 再接 abort / setModel
             } catch {
               /* 忽略坏帧 */
             }

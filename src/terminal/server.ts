@@ -15,6 +15,7 @@ import {
   type TerminalCommand,
   type TerminalEventBatch,
   type TerminalRegistryEntry,
+  type TerminalResponse,
   type TerminalSessionInfo,
 } from './protocol.ts';
 
@@ -38,6 +39,10 @@ export class TerminalServer {
   private readonly connections = new Map<string, Connection>();
   private readonly entries = new Map<string, TerminalRegistryEntry>();
   private readonly listeners = new Map<string, Set<SessionListener>>();
+  /** chatId → 选中的终端 sessionId（同 cwd 可多终端，故不能用 cwd 当键）。 */
+  private readonly chatBinding = new Map<string, string>();
+  /** requestId → 等待中的请求（T5 的请求-响应通路）。 */
+  private readonly pending = new Map<string, (res: TerminalResponse) => void>();
   private readonly factory?: TerminalSessionFactory;
   private port = 0;
 
@@ -97,6 +102,37 @@ export class TerminalServer {
   /** 当前已注册的终端会话（T2 供 /agents 使用）。 */
   listSessions(): TerminalRegistryEntry[] {
     return [...this.entries.values()];
+  }
+
+  /** 把某个飞书会话绑定到指定的终端会话（/switch 用）。 */
+  bindChat(chatId: string, sessionId: string): void {
+    this.chatBinding.set(chatId, sessionId);
+  }
+
+  /** 取该飞书会话绑定的终端 sessionId。 */
+  boundSession(chatId: string): string | undefined {
+    return this.chatBinding.get(chatId);
+  }
+
+  /** 解除绑定（/release 或会话清理）。 */
+  unbindChat(chatId: string): void {
+    this.chatBinding.delete(chatId);
+  }
+
+  /** 下发一条请求并等待扩展回应（带超时，避免永久挂起）。 */
+  request(sessionId: string, cmd: TerminalCommand, timeoutMs = 8_000): Promise<TerminalResponse | null> {
+    if (!this.dispatch(sessionId, cmd)) return Promise.resolve(null);
+    const requestId = cmd.requestId;
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(requestId);
+        resolve(null);
+      }, timeoutMs);
+      this.pending.set(requestId, (res) => {
+        clearTimeout(timer);
+        resolve(res);
+      });
+    });
   }
 
   /** 取某会话的 AgentSession（不存在则 undefined）。 */
@@ -164,6 +200,19 @@ export class TerminalServer {
       log.info(
         `终端会话注册 ${info.sessionId.slice(-6)} cwd=${info.cwd} pid=${info.pid ?? '?'}`,
       );
+      res.writeHead(204).end();
+      return;
+    }
+    // 扩展对请求的回应（pullState 等）
+    if (req.method === 'POST' && path === '/terminal/respond') {
+      const body = await this.readJson<TerminalResponse>(req);
+      if (body?.requestId) {
+        const resolve = this.pending.get(body.requestId);
+        if (resolve) {
+          this.pending.delete(body.requestId);
+          resolve(body);
+        }
+      }
       res.writeHead(204).end();
       return;
     }

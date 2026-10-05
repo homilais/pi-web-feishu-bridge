@@ -60,6 +60,67 @@ function respond(base: string, sessionId: string, requestId: string, payload: Re
   }).catch(() => {});
 }
 
+/**
+ * 双通道审批：终端弹窗与飞书卡片**同时**出现，先响应者胜，另一侧经 AbortSignal 撤销。
+ *
+ * 依赖 pi 的 `ExtensionUIDialogOptions.signal` —— 官方注释为
+ * “AbortSignal to programmatically dismiss the dialog”，即弹窗可被程序化撤除。
+ *
+ * 仅在飞书发起的回合才对飞书开放（用户自己在终端发起的回合，飞书看不到也不可代批）。
+ */
+async function dualChannelConfirm(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  base: string,
+  sessionId: string,
+  title: string,
+  message: string,
+  remoteTurn: boolean,
+): Promise<boolean> {
+  const ac = new AbortController();
+  const terminal = ctx.ui.confirm(title, message, { signal: ac.signal });
+
+  if (!remoteTurn) {
+    // 用户终端发起的回合：只在终端审批，飞书不参与
+    return terminal;
+  }
+
+  const requestId = crypto.randomUUID();
+  // 告知飞书有一笔待审批；桥接渲染审批卡
+  void fetch(`${base}/terminal/events`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      sessionId,
+      seq: 0,
+      events: [{ type: 'extension_ui_request', id: requestId, method: 'confirm', message }],
+    }),
+  }).catch(() => {});
+
+  // 等飞书侧回一个 resolveApproval 命令（由下行流消费）
+  const remote = waitForRemoteApproval(requestId);
+  const winner = await Promise.race([
+    terminal.then((ok) => ({ side: 'terminal' as const, ok })),
+    remote.then((ok) => ({ side: 'feishu' as const, ok })),
+  ]);
+  // 先到者胜 → 撤掉另一侧
+  if (winner.side === 'feishu') ac.abort();
+  return winner.ok;
+}
+
+const remoteApprovals = new Map<string, (ok: boolean) => void>();
+function waitForRemoteApproval(requestId: string): Promise<boolean> {
+  return new Promise((resolve) => remoteApprovals.set(requestId, resolve));
+}
+/** 供下行命令处理器调用：飞书侧已给出审批结论。 */
+export function resolveRemoteApproval(requestId: string, approved: boolean): void {
+  const fn = remoteApprovals.get(requestId);
+  if (fn) {
+    remoteApprovals.delete(requestId);
+    fn(approved);
+  }
+}
+
 /** 桥接在不在？读发现文件 + 校验 pid 存活 + 端口可连。 */
 async function probeBridge(): Promise<number | null> {
   try {
@@ -153,6 +214,8 @@ export default function (pi: ExtensionAPI): void {
                 text?: string;
                 provider?: string;
                 modelId?: string;
+                requestId?: string;
+                approved?: boolean;
               };
               if (cmd.type === 'prompt' && cmd.text) {
                 // followUp：排队，不插队当前轮（与 pi-web 后端一致）
@@ -168,6 +231,9 @@ export default function (pi: ExtensionAPI): void {
                 } catch (e) {
                   respond(base, sessionId, cmd.requestId, { ok: false, error: String(e).slice(0, 120) });
                 }
+              } else if (cmd.type === 'resolveApproval') {
+                // T6：飞书侧已给出审批结论 → 参与竞速
+                resolveRemoteApproval(cmd.requestId, cmd.approved);
               } else if (cmd.type === 'pullState') {
                 // T5：/last 所需的真实会话历史 + 当前模型 + 空闲态
                 const entries = ctx.sessionManager.getEntries();
@@ -256,5 +322,25 @@ export default function (pi: ExtensionAPI): void {
       offEvent?.();
       controller.abort();
     });
+
+    // 4b. 工具执行审批闸门（可选）
+    //
+    // pi 本身**没有**内置的工具审批 —— `extension_ui_request` 只在扩展主动调
+    // `ctx.ui.confirm` 时产生。所以要让终端回合出现审批，pi-feishu 必须自己充当
+    // 那个「权限扩展」。这会改变用户本地 pi 的行为，故默认关闭，需显式开启：
+    //   PI_FEISHU_GATE=1 pi
+    if (process.env.PI_FEISHU_GATE === '1') {
+      pi.on('tool_call', async (event, tctx) => {
+        const hints = pi.getAllTools?.().find((t) => t.name === (event as { toolName?: string }).toolName)?.annotations;
+        const needsApproval =
+          hints?.destructiveHint === true ||
+          (!hints?.readOnlyHint && ((hints?.destructiveHint ?? true) || (hints?.openWorldHint ?? true)));
+        if (!needsApproval) return;
+        const ok = await dualChannelConfirm(pi, tctx, base, sessionId, '允许工具调用？', (event as { toolName?: string }).toolName ?? 'tool', remoteTurn);
+        if (!ok) {
+          return { block: true, reason: `${(event as { toolName?: string }).toolName ?? 'tool'} was not approved` };
+        }
+      });
+    }
   });
 }

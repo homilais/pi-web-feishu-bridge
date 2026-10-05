@@ -442,6 +442,20 @@ export class Bridge {
     }
     if (cmd === 'approve' || cmd === 'reject') {
       const requestId = String(v.requestId ?? '');
+      // 终端会话：审批结论需下发到扩展，由扩展的竞速逻辑撤掉终端弹窗
+      if (this.deps.terminal) {
+        const sid = this.deps.terminal.boundSession(evt.chatId);
+        if (sid) {
+          this.deps.terminal.dispatch(sid, {
+            type: 'resolveApproval',
+            requestId,
+            approved: cmd === 'approve',
+          });
+        }
+        // 仍需 resolve 本地 pending，否则 TurnState 状态机不推进、卡片卡在 awaiting_approval
+        this.deps.pending.resolve(requestId, cmd === 'approve', v);
+        return;
+      }
       this.deps.pending.resolve(requestId, cmd === 'approve', v);
       return;
     }

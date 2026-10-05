@@ -56,9 +56,9 @@ Nightmanager implementation queue.
     - npm run build
   - Notes: 扩展随现有 npm 包分发以保证版本永不错位（扩展与桥接之间有协议，错位表现为连上但无事件、极难排查）。本片完成后功能可日常使用，后续为增强。
 
-- [ready] T4 飞书发起回合的流式卡片
+- [done] T4 飞书发起回合的流式卡片
   - Spec: `specs/terminal-bot.md`
-  - Blocked by: None — T2 已完成（`1903441`）
+  - Commit: `a9b59c9`
   - Scope: 飞书发起的回合以流式卡片实时更新直至结束，且长时间任务下卡片文字与终端实际输出完全一致。
   - Acceptance:
     - 飞书发起回合后卡片实时更新直至该轮结束

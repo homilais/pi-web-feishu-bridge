@@ -69,9 +69,9 @@ Nightmanager implementation queue.
     - npm run build
   - Notes: 上行批量上报需合并相邻的增量文本（追加语义，丢弃即丢字），其余事件有幂等或不可丢约束，逐类核对见 spec。合并规则错误只在长任务下暴露，人工验证不可省。
 
-- [ready] T5 功能对齐：停止、模型、状态、历史、切换
+- [done] T5 功能对齐：停止、模型、状态、历史、切换
   - Spec: `specs/terminal-bot.md`
-  - Blocked by: T4 飞书发起回合的流式卡片
+  - Commit: `e434a02`
   - Scope: 终端会话在停止、模型切换、状态展示、历史查看、会话切换上与 pi-web 会话对等。
   - Acceptance:
     - 可中止任意回合（含用户在终端发起的回合）

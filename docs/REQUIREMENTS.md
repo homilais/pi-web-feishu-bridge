@@ -397,3 +397,13 @@ bots:
 | `src/feishu/cards.ts` | 无结构变化（项目列表已是参数化），仅数据源受限 |
 | `package.json` | 新增依赖 `js-yaml` 及其 `@types/js-yaml` |
 | `.gitignore` | 新增 `config.yaml`、`config.json` |
+
+### 2026-10-05　终端感知机器人
+
+见完整设计 `specs/terminal-bot.md`。要点：
+
+- 新增第三类机器人 `kind: pi-terminal`：可绑终端 pi 会话，与 pi-web 机器人**严格隔离**
+- pi 无入站端口，故由扩展主动外连；桥接仅监听 `127.0.0.1`，不设 token
+- 上行批量合并相邻 `text_delta`（追加语义，丢字即永久丢失）
+- 审批不对称：终端为超集批准者（信息完整）；飞书仅能批自己发起的回合
+- 生命周期：断线标离线 → 60s 移除；重连重取状态而非补发事件

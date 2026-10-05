@@ -84,9 +84,9 @@ Nightmanager implementation queue.
     - npm run build
   - Notes: 停止权限刻意宽于批准权限：停止是收回控制权，最坏结果是白干；批准是授予权限，需信息完整，故仅发起方或信息完整的终端可批。这条不一致是刻意设计，见 spec 审批小节。
 
-- [ready] T6 审批双通道（终端与飞书可同时批准，先响应者胜）
+- [done] T6 审批双通道（终端与飞书可同时批准，先响应者胜）
   - Spec: `specs/terminal-bot.md`
-  - Blocked by: None — T4 已完成（`a9b59c9`）
+  - Commit: `c3591bd`
   - Scope: 飞书发起的回合需批准时，终端与飞书同时呈现审批，任一侧响应后另一侧消失；用户在终端发起的回合，飞书不可见也不可代批。
   - Acceptance:
     - 飞书发起且需批准的回合，终端与飞书同时出现审批
@@ -97,9 +97,9 @@ Nightmanager implementation queue.
     - npm run build
   - Notes: 终端为超集批准者，因其持有全部对话记录（含飞书发起的消息），信息完整；飞书看不到用户在终端的操作，故不能代批。撤销另一侧审批依赖 pi 提供的对话框取消能力（官方注释为可程序化撤除该对话框），非自行模拟。
 
-- [ready] T7 生命周期韧性：断线标记、超时移除、重连状态重取
+- [done] T7 生命周期韧性：断线标记、超时移除、重连状态重取
   - Spec: `specs/terminal-bot.md`
-  - Blocked by: None — T4 已完成（`a9b59c9`）
+  - Commit: `e435648`
   - Scope: 终端会话在连接异常与恢复时的表现可预期：短暂断线保留为离线、超时移除、恢复后状态正确。
   - Acceptance:
     - 扩展连接断开后列表该项标记为离线并保留

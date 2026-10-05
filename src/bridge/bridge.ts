@@ -16,8 +16,13 @@ import {
   lastReplyCard,
   agentsCard,
   progressCard,
+  streamCard,
 } from '../feishu/cards.ts';
+import { TurnState } from './turn-state.ts';
 import { logger } from '../log.ts';
+
+/** 流式卡片刷新间隔（与 streamer 一致）。 */
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 const log = logger('bridge');
 
@@ -275,6 +280,13 @@ export class Bridge {
       await this.sendInfoCard(msg.chatId, '还没选择项目，请从下方「切换项目」下拉选一个：');
       return;
     }
+
+    // 终端感知机器人：直接向已注册的终端会话下发，并挂一张流式卡片
+    if (this.deps.terminal) {
+      await this.runTerminalTurn(msg.chatId, cwd, text);
+      return;
+    }
+
     const project = (await this.getProjects()).find((p) => p.cwd === cwd);
     if (!project) {
       await this.sendErr(msg.chatId, `⚠️ 未找到项目 ${cwd}`);
@@ -301,6 +313,66 @@ export class Bridge {
           this.activeTurns.delete(agentId);
         });
     });
+  }
+
+  /** 终端会话的一轮：先挂流式卡片（订阅上行事件），再下发 prompt。
+   *  顺序很重要 —— 先订阅后下发，避免极快完成的轮次丢事件。 */
+  private async runTerminalTurn(chatId: string, cwd: string, text: string): Promise<void> {
+    const terminal = this.deps.terminal;
+    if (!terminal) return;
+    // cwd 对应的终端会话：取最近注册且在线的那一个
+    const sessions = terminal.listSessions().filter((e) => e.info.cwd === cwd && e.online);
+    if (!sessions.length) {
+      await this.sendErr(chatId, `⚠️ 没有在线的终端会话（cwd=${cwd}），请先在终端启动 pi`);
+      return;
+    }
+    const entry = sessions[sessions.length - 1];
+    const sessionId = entry.info.sessionId;
+    const label = entry.info.label ?? projectLabel(cwd);
+
+    const turnId = crypto.randomUUID();
+    const turn = new TurnState(turnId, text);
+    const unsubscribe = terminal.onSessionEvent(sessionId, (ev) => turn.handleEvent(ev, this.deps.pending));
+
+    try {
+      const streamP = this.channel.stream(
+        chatId,
+        {
+          card: {
+            initial: streamCard(turn, label),
+            producer: async (ctl) => {
+              let lastSig = turn.signature();
+              while (!turn.done && Date.now() < turn.deadline) {
+                await sleep(450);
+                const sig = turn.signature();
+                if (sig !== lastSig) {
+                  await ctl.update(streamCard(turn, label)).catch(() => {});
+                  lastSig = sig;
+                }
+              }
+              await ctl.update(streamCard(turn, label)).catch(() => {});
+            },
+          },
+        },
+        { replyTo: undefined },
+      );
+
+      // 先把 prompt 下发到终端
+      const ok = terminal.dispatch(sessionId, { type: 'prompt', requestId: turnId, text });
+      if (!ok) {
+        await this.sendErr(chatId, '❌ 终端会话已离线，请重试');
+        unsubscribe();
+        return;
+      }
+      const result = await streamP;
+      if (result.messageId) this.registry.rememberRoute(result.messageId, cwd, sessionId);
+      log.info(`[terminal] 轮次结束 ${turnId.slice(-6)} status=${turn.status} 文本=${turn.text.length}字`);
+    } catch (e) {
+      log.error('[terminal] 轮次异常', e);
+      await this.sendErr(chatId, `❌ 内部错误：${String(e).slice(0, 200)}`);
+    } finally {
+      unsubscribe();
+    }
   }
 
   /** 404 自愈：agent 失效时清除记录重建一次。 */

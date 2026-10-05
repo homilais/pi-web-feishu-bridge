@@ -1,6 +1,7 @@
 // 终端接入协议：桥接侧（server）与 pi 扩展（client）之间的报文格式。
 // 方向：扩展主动外连 —— pi 没有入站端口，故桥接监听、扩展拨号。
 // 拓扑：扩展 --POST register--> 桥接；扩展 <--SSE 持续下行-- 桥接；扩展 --POST events--> 桥接。
+import type { PiWebEvent } from '../piweb/types.ts';
 
 /** 扩展上报的会话信息（注册时一次）。 */
 export interface TerminalSessionInfo {
@@ -25,14 +26,14 @@ export type TerminalCommand =
   | { type: 'setModel'; requestId: string; provider: string; modelId: string }
   | { type: 'pullState'; requestId: string };
 
-/** 扩展 → 桥接 的上行事件（T2 只用到 settled/heartbeat，其余留给 T4+）。 */
-export interface TerminalEvent {
+/** 扩展 → 桥接 的上行批次。
+ *  events 为一串 pi 事件，形状与桥接侧 TurnState 消费的一致（见 piweb/types.ts）。 */
+export interface TerminalEventBatch {
   sessionId: string;
-  /** 序号，单调递增；桥接用它识别断线重连后的断层。 */
+  /** 单调递增；桥接用它识别重连后的断层。 */
   seq: number;
-  /** 轮次结束。T2 只用它更新列表状态。 */
-  kind: 'settled' | 'heartbeat';
-  /** 心跳/空闲时上报当前是否在跑，供列表显示运行态。 */
+  events: PiWebEvent[];
+  /** 心跳时携带；供列表显示运行态。 */
   busy?: boolean;
 }
 

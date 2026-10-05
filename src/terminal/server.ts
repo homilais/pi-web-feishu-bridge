@@ -6,13 +6,14 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { AgentSession } from '../bridge/agent-session.ts';
+import type { PiWebEvent } from '../piweb/types.ts';
 import { logger } from '../log.ts';
 import {
   DISCOVERY_DIR,
   DISCOVERY_FILE,
   type BridgeDiscovery,
   type TerminalCommand,
-  type TerminalEvent,
+  type TerminalEventBatch,
   type TerminalRegistryEntry,
   type TerminalSessionInfo,
 } from './protocol.ts';
@@ -28,16 +29,34 @@ interface Connection {
   res: ServerResponse;
 }
 
+/** 某个会话的事件订阅者（由 AgentSession.onEvent 桥接过来）。 */
+type SessionListener = (ev: PiWebEvent) => void;
+
 export class TerminalServer {
   private server?: Server;
   private discoveryPath?: string;
   private readonly connections = new Map<string, Connection>();
   private readonly entries = new Map<string, TerminalRegistryEntry>();
+  private readonly listeners = new Map<string, Set<SessionListener>>();
   private readonly factory?: TerminalSessionFactory;
   private port = 0;
 
   constructor(factory?: TerminalSessionFactory) {
     this.factory = factory;
+  }
+
+  /** 订阅某终端会话的事件流（AgentSession.onEvent 的桥接实现）。返回退订函数。 */
+  onSessionEvent(sessionId: string, listener: SessionListener): () => void {
+    let set = this.listeners.get(sessionId);
+    if (!set) {
+      set = new Set();
+      this.listeners.set(sessionId, set);
+    }
+    set.add(listener);
+    return () => {
+      set!.delete(listener);
+      if (!set!.size) this.listeners.delete(sessionId);
+    };
   }
 
   /** 启动监听并写发现文件。返回实际端口。 */
@@ -122,8 +141,9 @@ export class TerminalServer {
     const path = rawUrl.split('?')[0];
     // 事件上行：扩展批量 POST
     if (req.method === 'POST' && path === '/terminal/events') {
-      const body = await this.readJson<TerminalEvent[]>(req);
-      if (Array.isArray(body)) body.forEach((e) => this.applyEvent(e));
+      const body = await this.readJson<TerminalEventBatch | TerminalEventBatch[]>(req);
+      const batches = Array.isArray(body) ? body : body ? [body] : [];
+      batches.forEach((b) => this.applyBatch(b));
       res.writeHead(204).end();
       return;
     }
@@ -177,11 +197,28 @@ export class TerminalServer {
     res.writeHead(404).end();
   }
 
-  private applyEvent(e: TerminalEvent): void {
-    const entry = this.entries.get(e.sessionId);
+  private applyBatch(b: TerminalEventBatch): void {
+    const entry = this.entries.get(b.sessionId);
     if (!entry) return;
     entry.lastSeenAt = Date.now();
-    if (typeof e.busy === 'boolean') entry.busy = e.busy;
+    if (typeof b.busy === 'boolean') entry.busy = b.busy;
+    // settled 用于收尾会话状态
+    for (const ev of b.events ?? []) {
+      if (ev.type === 'agent_settled' || ev.type === 'agent_end') entry.busy = false;
+    }
+    // 扇出给订阅者（如流式卡片）
+    const subs = this.listeners.get(b.sessionId);
+    if (subs && subs.size) {
+      for (const ev of b.events ?? []) {
+        for (const fn of subs) {
+          try {
+            fn(ev);
+          } catch (e) {
+            log.warn(`事件订阅回调异常：${String(e).slice(0, 80)}`);
+          }
+        }
+      }
+    }
   }
 
   private readJson<T>(req: IncomingMessage): Promise<T | null> {

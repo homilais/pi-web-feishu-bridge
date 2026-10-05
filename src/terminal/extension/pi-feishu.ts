@@ -21,6 +21,36 @@ interface BridgeDiscovery {
   version?: string;
 }
 
+/** 上行批次周期（spec 定为 200ms）。 */
+const FLUSH_MS = 200;
+/** 积压保护阈值。 */
+const MAX_BACKLOG = 400;
+
+/** 透传给桥接的 pi 事件（形状与桥接侧 TurnState 一致）。 */
+type PiEvent = { type: string; [k: string]: unknown };
+
+/** 合并相邻的增量文本 —— 追加语义，丢字即永久丢失，故只能拼不能丢。 */
+function coalesce(events: PiEvent[]): PiEvent[] {
+  const isDelta = (e: PiEvent): boolean =>
+    e.type === 'message_update' &&
+    (e.assistantMessageEvent as { type?: string } | undefined)?.type === 'text_delta';
+  const out: PiEvent[] = [];
+  for (const ev of events) {
+    const prev = out[out.length - 1];
+    if (isDelta(ev) && prev && isDelta(prev)) {
+      const a = prev.assistantMessageEvent as { type: string; delta: string; [k: string]: unknown };
+      const b = ev.assistantMessageEvent as { type: string; delta: string };
+      out[out.length - 1] = {
+        ...prev,
+        assistantMessageEvent: { ...a, delta: `${a.delta ?? ''}${b.delta ?? ''}` },
+      };
+      continue;
+    }
+    out.push(ev);
+  }
+  return out;
+}
+
 /** 桥接在不在？读发现文件 + 校验 pid 存活 + 端口可连。 */
 async function probeBridge(): Promise<number | null> {
   try {
@@ -78,7 +108,13 @@ export default function (pi: ExtensionAPI): void {
       return;
     }
 
-    // 2. 保持下行命令流（桥接经此下发 prompt/abort/...）
+    // 2. 往返状态（先于 SSE 声明，供下行回调置位）
+    let backlog: PiEvent[] = [];
+    let seq = 0;
+    let remoteTurn = false; // 是否在飞书发起的回合中（D2：只报飞书回合）
+    const FORWARD_MAX = 400;
+
+    // 3. 保持下行命令流（桥接经此下发 prompt/abort/...）
     const controller = new AbortController();
     void (async () => {
       try {
@@ -110,6 +146,7 @@ export default function (pi: ExtensionAPI): void {
               };
               if (cmd.type === 'prompt' && cmd.text) {
                 // followUp：排队，不插队当前轮（与 pi-web 后端一致）
+                remoteTurn = true;
                 await pi.sendUserMessage(cmd.text, { deliverAs: 'followUp' });
               }
               // T5 再接 abort / setModel
@@ -123,17 +160,72 @@ export default function (pi: ExtensionAPI): void {
       }
     })();
 
-    // 3. 周期上报状态（仅状态，不含对话内容）
-    const timer = setInterval(() => {
-      void fetch(`${base}/terminal/events`, {
+    // 4. 事件上行：缓冲 → 每 200ms 合并后 POST
+    const FORWARD = new Set([
+      'agent_start',
+      'message_update',
+      'message_end',
+      'tool_execution_start',
+      'tool_execution_update',
+      'tool_execution_end',
+      'agent_end',
+      'agent_settled',
+    ]);
+
+    const flush = async (): Promise<void> => {
+      if (!backlog.length) return;
+      const batch = coalesce(backlog);
+      backlog = [];
+      await fetch(`${base}/terminal/events`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify([{ sessionId, seq: 0, kind: 'heartbeat', busy: !ctx.isIdle() }]),
+        body: JSON.stringify({
+          sessionId,
+          seq: ++seq,
+          events: batch,
+          busy: !ctx.isIdle(),
+        }),
       }).catch(() => {});
-    }, 5_000);
+    };
+    // 200ms 定时 flush；单发送者 + drain（on 上方 await），避免并发 POST
+    let flushing = false;
+    const timer = setInterval(() => {
+      if (!backlog.length || flushing) return;
+      flushing = true;
+      void flush().finally(() => {
+        flushing = false;
+      });
+    }, FLUSH_MS);
+
+    // 注册事件转发
+    const offEvent = pi.on('message_update' as never, ((ev: unknown) => {
+      if (!FORWARD.has('message_update')) return;
+      if (!remoteTurn) return; // 用户终端的回合不上报
+      const e = ev as PiEvent;
+      const ame = (e.assistantMessageEvent as { type?: string } | undefined)?.type;
+      // thinking 噪声大且不进卡片文本，略过以省带宽
+      if (ame === 'thinking_delta' || ame === 'thinking_start') return;
+      backlog.push(e);
+      if (backlog.length > FORWARD_MAX) backlog = backlog.slice(-FORWARD_MAX);
+    }) as never);
+
+    pi.on('tool_execution_start' as never, ((ev: unknown) => {
+      if (!remoteTurn) return;
+      backlog.push(ev as PiEvent);
+    }) as never);
+    pi.on('tool_execution_end' as never, ((ev: unknown) => {
+      if (!remoteTurn) return;
+      backlog.push(ev as PiEvent);
+    }) as never);
+    pi.on('agent_settled' as never, (() => {
+      // 终态总是转发：否则卡片永不收尾
+      backlog.push({ type: 'agent_settled' });
+      remoteTurn = false;
+    }) as never);
 
     pi.on('session_shutdown', () => {
       clearInterval(timer);
+      offEvent?.();
       controller.abort();
     });
   });

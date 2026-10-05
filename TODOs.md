@@ -29,9 +29,9 @@ Nightmanager implementation queue.
     - npm run build
   - Notes: prefactoring。约 17 处调用点，分布在桥接核心与流式层，模式高度一致，属机械迁移；由类型检查保证每步可绿。这是后续所有切片的前置条件。
 
-- [ready] T2 端到端最小闭环（终端会话可发现、可下发消息）
+- [done] T2 端到端最小闭环（终端会话可发现、可下发消息）
   - Spec: `specs/terminal-bot.md`
-  - Blocked by: None — T1 已完成（`4545eca`）
+  - Commit: `1903441`
   - Scope: 终端 pi 启动后其会话出现在 terminal 机器人的列表中，可被选中并向其下发一条消息，该消息出现在用户终端里。本片打通最窄路径，不含流式与审批。
   - Acceptance:
     - terminal 机器人可配置、可启动，且与其他两类机器人严格隔离（互相不可见）
@@ -45,7 +45,7 @@ Nightmanager implementation queue.
 
 - [ready] T3 扩展一键安装与 bridge 缺席时优雅降级
   - Spec: `specs/terminal-bot.md`
-  - Blocked by: T2 端到端最小闭环（终端会话可发现、可下发消息）
+  - Blocked by: None — T2 已完成（`1903441`）
   - Scope: 扩展可一键安装到 pi 的扩展目录，装完直接用 pi 即可被飞书发现；桥接未运行时扩展静默降级并给一次提示，不影响本地使用。
   - Acceptance:
     - 一条命令把扩展安装到 pi 扩展目录，随后启动 pi 即可被飞书发现
@@ -58,7 +58,7 @@ Nightmanager implementation queue.
 
 - [ready] T4 飞书发起回合的流式卡片
   - Spec: `specs/terminal-bot.md`
-  - Blocked by: T2 端到端最小闭环（终端会话可发现、可下发消息）
+  - Blocked by: None — T2 已完成（`1903441`）
   - Scope: 飞书发起的回合以流式卡片实时更新直至结束，且长时间任务下卡片文字与终端实际输出完全一致。
   - Acceptance:
     - 飞书发起回合后卡片实时更新直至该轮结束

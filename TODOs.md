@@ -111,9 +111,9 @@ Nightmanager implementation queue.
     - npm run build
   - Notes: 重连走状态重取而非事件补发：重取复用历史查看的既有通路，而为一次断线维护带序号的持久事件缓冲，复杂度与收益不成比例。代价是断线期间的中间过程永久丢失，只保最终结果（spec 已接受）。
 
-- [ready] T8 文档同步
+- [done] T8 文档同步
   - Spec: `specs/terminal-bot.md`
-  - Blocked by: T5 功能对齐：停止、模型、状态、历史、切换; T6 审批双通道（终端与飞书可同时批准，先响应者胜）; T7 生命周期韧性：断线标记、超时移除、重连状态重取
+  - Commit: `49cd7fd`
   - Scope: 让用户与后续维护者能依据文档正确安装、配置、使用与理解终端模式。
   - Acceptance:
     - 安装指引含一键安装步骤

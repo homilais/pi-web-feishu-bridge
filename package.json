@@ -23,7 +23,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-extension.mjs",
     "dev": "node --watch --env-file-if-exists=.env src/cli.ts",
     "start": "node --env-file-if-exists=.env dist/cli.js",
     "start:ts": "node --env-file-if-exists=.env src/cli.ts",

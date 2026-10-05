@@ -11,6 +11,7 @@ import { createLarkChannel } from '@larksuiteoapi/node-sdk';
 import { copyFileSync, existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { logger } from './log.ts';
+import { TerminalServer } from './terminal/server.ts';
 
 const log = logger('main');
 
@@ -24,6 +25,7 @@ async function startBot(
   client: PiWebClient,
   scopedCwdsGlobal: string[],
   defaultModel: { provider: string; modelId: string } | undefined,
+  terminal?: TerminalServer,
 ): Promise<{ channel: ReturnType<typeof createLarkChannel>; disconnect: () => Promise<void> }> {
   // 默认机器人：若 registry.<id>.json 不存在但旧 registry.json 存在，做一次性迁移
   const regPath = resolve(`registry.${bot.id}.json`);
@@ -66,6 +68,7 @@ async function startBot(
     defaultModel,
     allowOpenIds: bot.allowOpenIds,
     groupAllowlist: bot.groupAllowlist,
+    terminal,
   });
 
   channel.on('message', (msg) => void bridge.onMessage(msg));
@@ -101,16 +104,30 @@ export async function main(opts: MainOptions = {}): Promise<void> {
 
   const scopedCwdsGlobal = scopedCwdsOf(cfg.bots);
 
+  // 存在终端感知机器人时才启动本机监听（仅 127.0.0.1，无 token）
+  const needsTerminal = cfg.bots.some((b) => b.kind === 'pi-terminal');
+  let terminal: TerminalServer | undefined;
+  if (needsTerminal) {
+    terminal = new TerminalServer();
+    try {
+      await terminal.start();
+    } catch (e) {
+      log.error('终端接入服务启动失败（端口被占用？），桥接退出', e);
+      process.exit(1);
+    }
+  }
+
   // 启动每个机器人
   const bots: Awaited<ReturnType<typeof startBot>>[] = [];
   for (const bot of cfg.bots) {
-    bots.push(await startBot(bot, client, scopedCwdsGlobal, cfg.defaultModel));
+    bots.push(await startBot(bot, client, scopedCwdsGlobal, cfg.defaultModel, terminal));
   }
 
   log.info(`✅ 桥接已就绪。${cfg.bots.length} 个机器人。在飞书里给机器人发消息试试。`);
 
   const shutdown = async (sig: string) => {
     log.info(`收到 ${sig}，关闭中…`);
+    if (terminal) await terminal.stop().catch(() => {});
     await Promise.all(bots.map((b) => b.disconnect()));
     process.exit(0);
   };

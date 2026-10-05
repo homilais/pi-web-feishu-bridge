@@ -7,6 +7,7 @@ import type { QueueMap, PendingApprovals } from './queue.ts';
 import { projectLabel } from '../config.ts';
 import type { ProjectInfo, RpcCommand, ModelsEnabledResponse } from '../piweb/types.ts';
 import { PiWebHttpError } from '../piweb/client.ts';
+import type { TerminalServer } from '../terminal/server.ts';
 import { runTurn, attachRunningTurn } from './streamer.ts';
 import { PiWebSession, type AgentSession } from './agent-session.ts';
 import {
@@ -37,6 +38,8 @@ export interface BridgeDeps {
   defaultModel?: { provider: string; modelId: string };
   allowOpenIds: string[];
   groupAllowlist: string[];
+  /** 终端接入服务（仅 pi-terminal 机器人注入，其余为 undefined）。 */
+  terminal?: TerminalServer;
 }
 
 export class Bridge {
@@ -772,6 +775,18 @@ export class Bridge {
       }
       case 'agents': {
         await this.pruneDeadAgents(); // 已回收的直接解绑，不再展示
+        // 终端感知机器人：列出已注册的终端 pi 会话（不去重，一进程一条）
+        if (this.deps.terminal) {
+          const rows = this.deps.terminal.listSessions().map((e) => ({
+            cwd: e.info.cwd,
+            label: `${e.info.label ?? projectLabel(e.info.cwd)} · pid ${e.info.pid}`,
+            agentId: e.info.sessionId,
+            state: e.online ? (e.busy ? '🔴 运行中' : '🟢 空闲') : '⚪ 离线',
+          }));
+          const cur = this.registry.projectOf(msg.chatId);
+          await this.sendRouteCard(msg.chatId, agentsCard(rows, cur), cur, cur);
+          break;
+        }
         const entries = this.registry.agentEntries();
         const rows = await Promise.all(
           entries.map(async (e) => {

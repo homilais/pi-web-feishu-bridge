@@ -1,6 +1,6 @@
 {
   "name": "pi-web-feishu-bridge",
-  "version": "0.1.3",
+  "version": "0.2.0",
   "type": "module",
   "description": "飞书远程指挥 pi 编码 agent（外挂式桥接 @agegr/pi-web）",
   "keywords": [

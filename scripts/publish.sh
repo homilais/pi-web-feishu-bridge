@@ -69,7 +69,14 @@ step "4/5 版本号 $VERSION"
 npm version "$VERSION" --no-git-tag-version || npm version "$VERSION"
 
 step "5/5 发布到 npm"
-npm publish --registry=https://registry.npmjs.org/
+# 账号开启 2FA 且 token 未勾「Bypass two-factor authentication」时，npm 会报 EOTP。
+# 此时可用验证器的 6 位动态码完成本次发布：NPM_OTP=123456 ./scripts/publish.sh minor
+OTP_ARGS=()
+if [ -n "${NPM_OTP:-}" ]; then
+  echo "  使用 NPM_OTP 提供的一次性验证码发布"
+  OTP_ARGS=(--otp "$NPM_OTP")
+fi
+npm publish --registry=https://registry.npmjs.org/ ${OTP_ARGS[@]+"${OTP_ARGS[@]}"}
 
 echo
 echo "🎉 发布完成！"

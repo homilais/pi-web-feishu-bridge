@@ -43,9 +43,9 @@ Nightmanager implementation queue.
     - npm run build
   - Notes: 本 spec 的核心风险集中在这片：桥接新增仅本机监听，扩展主动外连并注册会话，发现文件用于定位监听端口。优先打通端到端，后续片在此骨架上加能力。
 
-- [ready] T3 扩展一键安装与 bridge 缺席时优雅降级
+- [done] T3 扩展一键安装与 bridge 缺席时优雅降级
   - Spec: `specs/terminal-bot.md`
-  - Blocked by: None — T2 已完成（`1903441`）
+  - Commit: `e53bcf3`
   - Scope: 扩展可一键安装到 pi 的扩展目录，装完直接用 pi 即可被飞书发现；桥接未运行时扩展静默降级并给一次提示，不影响本地使用。
   - Acceptance:
     - 一条命令把扩展安装到 pi 扩展目录，随后启动 pi 即可被飞书发现

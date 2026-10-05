@@ -142,7 +142,12 @@ function card(
 
 /** /last 执行中：实时执行进展卡。
  *  数据来自 pi-web getSessionContext（执行中会返回实时消息）。 */
-export function progressCard(opts: { projectLabel: string; progress: LiveProgress }): object {
+export function progressCard(opts: {
+  projectLabel: string;
+  progress: LiveProgress;
+  /** 附加提示（如「进展在另一张卡片上」）。 */
+  notice?: string;
+}): object {
   const { projectLabel, progress } = opts;
   const sec = Math.round(progress.elapsedMs / 1000);
   const n = progress.steps.length;
@@ -171,7 +176,8 @@ export function progressCard(opts: { projectLabel: string; progress: LiveProgres
     elements.push(md(truncate(progress.currentText.trim(), 1500)));
   }
 
-  elements.push(hr(), md('📌 完成后结果会自动推送到本会话；再发 /last 可刷新'));
+  if (opts.notice) elements.push(md(opts.notice));
+  elements.push(hr(), md('📌 本卡为快照，不自动刷新；再发 `/last` 可重新拉取。'));
 
   return card(
     TPL.running,

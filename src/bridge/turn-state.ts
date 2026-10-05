@@ -30,11 +30,20 @@ export class TurnState {
   readonly startedAt: number;
   readonly deadline: number;
 
-  constructor(turnId: string, prompt: string) {
+  constructor(turnId: string, prompt: string, startedAt?: number) {
     this.turnId = turnId;
     this.prompt = prompt;
-    this.startedAt = Date.now();
+    this.startedAt = startedAt ?? Date.now();
     this.deadline = this.startedAt + 10 * 60 * 1000; // 10 分钟安全上限
+  }
+
+  /** 用执行进展快照预填时间线（/last 挂接进行中的轮次时用，避免卡片初始空白）。 */
+  seedProgress(p: { steps?: Array<{ toolName: string }>; currentText?: string }): void {
+    if (p.currentText?.trim()) this.segments.push({ kind: 'text', text: p.currentText });
+    for (const s of p.steps ?? []) {
+      this.segments.push({ kind: 'tool', id: `seed-${this.segments.length}-${s.toolName}`, name: s.toolName, status: 'done' });
+    }
+    if (this.segments.length) this.status = 'running';
   }
 
   /** 全部文字片段拼接（兼容旧字段 / 完成通知用）。 */

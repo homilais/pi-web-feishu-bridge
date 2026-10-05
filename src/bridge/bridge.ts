@@ -7,7 +7,7 @@ import type { QueueMap, PendingApprovals } from './queue.ts';
 import { projectLabel } from '../config.ts';
 import type { ProjectInfo, RpcCommand, ModelsEnabledResponse } from '../piweb/types.ts';
 import { PiWebHttpError } from '../piweb/client.ts';
-import { runTurn } from './streamer.ts';
+import { runTurn, attachRunningTurn } from './streamer.ts';
 import {
   statusCard,
   confirmCard,
@@ -42,6 +42,8 @@ export class Bridge {
   private deps: BridgeDeps;
   private projectCache?: { at: number; data: ProjectInfo[] };
   private modelCache?: { at: number; data: ModelsEnabledResponse };
+  /** 正在本进程流式推送的轮次：agentId → chatId。用于 /last 判定是否已在同一会话流式更新。 */
+  private activeTurns = new Map<string, { chatId: string; cwd: string }>();
 
   constructor(deps: BridgeDeps) {
     this.deps = deps;
@@ -273,8 +275,9 @@ export class Bridge {
     if (!agentId) return;
 
     log.info(`chat=${msg.chatId.slice(-6)} project=${project.label} prompt=${text.length}字`);
-    this.deps.queues.for(agentId).enqueue(() =>
-      this.executeTurn(msg.chatId, project.cwd, agentId, text, project.label)
+    this.deps.queues.for(agentId).enqueue(() => {
+      this.activeTurns.set(agentId, { chatId: msg.chatId, cwd: project.cwd });
+      return this.executeTurn(msg.chatId, project.cwd, agentId, text, project.label)
         .then((r) => {
           log.info(`turn 完成 status=${r.status} 文本=${r.text.length}字 ${r.durationMs}ms`);
           // 记录卡片 → agent 路由，供飞书回复定向
@@ -284,8 +287,11 @@ export class Bridge {
         .catch((e) => {
           log.error('turn 异常', e);
           this.sendErr(msg.chatId, `❌ 内部错误：${String(e).slice(0, 200)}`);
-        }),
-    );
+        })
+        .finally(() => {
+          this.activeTurns.delete(agentId);
+        });
+    });
   }
 
   /** 404 自愈：agent 失效时清除记录重建一次。 */
@@ -799,14 +805,39 @@ export class Bridge {
           const st0 = await this.client.getState(sid).catch(() => null);
           const busy = !!st0?.running && !!(st0.state?.isPromptRunning || st0.state?.isStreaming);
           if (busy) {
-            // 执行中 → 实时进展卡（数据来自 getSessionContext 的实时消息）
-            const progress = await this.client.getLiveProgress(sid);
-            await this.sendRouteCard(
+            const snapshot = await this.client.getLiveProgress(sid);
+            const active = this.activeTurns.get(sid);
+            // A. 本进程已在同一会话流式推送该轮次 → 不重复建卡，指向已有卡片
+            if (active && active.chatId === msg.chatId) {
+              await this.sendRouteCard(
+                msg.chatId,
+                progressCard({
+                  projectLabel: projectLabel(cwd),
+                  progress: snapshot,
+                  notice: 'ℹ️ 本轮进展正在上方那张流式卡片上实时更新，完成后会自动显示结果。',
+                }),
+                cwd,
+                sid,
+              );
+              return;
+            }
+            // B. 无本地流式卡片（任务由 pi-web/其他会话发起，或本进程重启过）
+            //    → 挂接 SSE，建一张持续更新到结束的卡片
+            log.info(`[bot=${this.deps.botId}] /last 挂接执行中轮次 sid=${sid.slice(-6)}`);
+            void attachRunningTurn(
+              this.channel,
+              this.client,
               msg.chatId,
-              progressCard({ projectLabel: projectLabel(cwd), progress }),
-              cwd,
               sid,
-            );
+              this.deps.pending,
+              projectLabel(cwd),
+              snapshot,
+            )
+              .then((r) => {
+                log.info(`挂接轮次结束 status=${r.status} 文本=${r.text.length}字`);
+                if (r.messageId) this.registry.rememberRoute(r.messageId, cwd, sid);
+              })
+              .catch((e) => log.warn(`挂接轮次失败：${String(e).slice(0, 120)}`));
             return;
           }
           // 获取最新回复（内部含「无效则重新查找」逻辑）

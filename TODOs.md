@@ -15,6 +15,8 @@ Nightmanager implementation queue.
 
 ### 终端感知机器人（spec: `specs/terminal-bot.md`）
 
+> PR: https://github.com/homilais/pi-web-feishu-bridge/pull/1
+
 - [done] T1 抽取 AgentSession 接口
   - Spec: `specs/terminal-bot.md`
   - Commit: `4545eca`

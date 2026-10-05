@@ -1,7 +1,6 @@
 // 翻译层核心：SSE 事件 → 飞书流式卡片
 import type { LarkChannel } from '@larksuiteoapi/node-sdk';
-import type { PiWebClient } from '../piweb/client.ts';
-import { subscribeEvents, type SseSubscription } from '../piweb/events.ts';
+import type { AgentSession } from './agent-session.ts';
 import type { PendingApprovals } from './queue.ts';
 import { TurnState } from './turn-state.ts';
 import { streamCard } from '../feishu/cards.ts';
@@ -23,20 +22,20 @@ export interface RunTurnResult {
 /** 运行一轮：建立 SSE → 发起流式卡片 → 发 prompt → 跟随事件更新卡片 → settled 终态。 */
 export async function runTurn(
   channel: LarkChannel,
-  client: PiWebClient,
+  session: AgentSession,
   chatId: string,
-  agentId: string,
   prompt: string,
   pending: PendingApprovals,
   projectLabel: string,
 ): Promise<RunTurnResult> {
+  const agentId = session.sessionId;
   const turnId = crypto.randomUUID();
   const turn = new TurnState(turnId, prompt);
   const startedAt = Date.now();
 
   let dbgCount = 0;
-  const sub: SseSubscription = subscribeEvents(client, agentId, {
-    onEvent: (ev) => {
+  const unsubscribe = session.onEvent(
+    (ev) => {
       dbgCount++;
       if (ev.type === 'message_update') {
         const ae = (ev as { assistantMessageEvent?: { type?: string; delta?: string } }).assistantMessageEvent;
@@ -46,8 +45,10 @@ export async function runTurn(
       }
       turn.handleEvent(ev, pending);
     },
-    onReconnect: (a) => log.warn(`agent ${agentId} SSE 重连 #${a}`),
-  });
+    {
+      onReconnect: (a) => log.warn(`agent ${agentId} SSE 重连 #${a}`),
+    },
+  );
 
   let messageId: string | undefined;
   try {
@@ -76,7 +77,7 @@ export async function runTurn(
     );
 
     await sleep(400);
-    await client.sendPrompt(agentId, prompt);
+    await session.prompt(prompt);
     const result = await streamP;
     messageId = result.messageId;
 
@@ -89,7 +90,7 @@ export async function runTurn(
     }
     log.info(`[dbg] 总事件 ${dbgCount} 个，turn.text=${turn.text.length}字 status=${turn.status}`);
   } finally {
-    sub.close();
+    unsubscribe();
   }
 
   return {
@@ -107,27 +108,29 @@ export async function runTurn(
  *  并发安全：pi-web 的 SSE 端点支持同一 session 多订阅（已实测）。 */
 export async function attachRunningTurn(
   channel: LarkChannel,
-  client: PiWebClient,
+  session: AgentSession,
   chatId: string,
-  agentId: string,
   pending: PendingApprovals,
   projectLabel: string,
   snapshot: LiveProgress,
 ): Promise<RunTurnResult> {
+  const agentId = session.sessionId;
   const turnId = crypto.randomUUID();
   const turn = new TurnState(turnId, snapshot.prompt, snapshot.startedAt);
   // 预填已有进展，卡片一出现就不是空白
   turn.seedProgress(snapshot);
   const startedAt = Date.now();
 
-  const sub: SseSubscription = subscribeEvents(client, agentId, {
-    onEvent: (ev) => {
+  const unsubscribe = session.onEvent(
+    (ev) => {
       turn.handleEvent(ev, pending);
       // agent_settled / agent_end 到达即收尾
       if (ev.type === 'agent_settled') turn.done = true;
     },
-    onReconnect: (a) => log.warn(`agent ${agentId} 挂接 SSE 重连 #${a}`),
-  });
+    {
+      onReconnect: (a) => log.warn(`agent ${agentId} 挂接 SSE 重连 #${a}`),
+    },
+  );
 
   let messageId: string | undefined;
   try {
@@ -165,7 +168,7 @@ export async function attachRunningTurn(
       turn.done = true;
     }
   } finally {
-    sub.close();
+    unsubscribe();
   }
 
   return {

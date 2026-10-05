@@ -8,6 +8,7 @@ import { projectLabel } from '../config.ts';
 import type { ProjectInfo, RpcCommand, ModelsEnabledResponse } from '../piweb/types.ts';
 import { PiWebHttpError } from '../piweb/client.ts';
 import { runTurn, attachRunningTurn } from './streamer.ts';
+import { PiWebSession, type AgentSession } from './agent-session.ts';
 import {
   statusCard,
   confirmCard,
@@ -61,6 +62,11 @@ export class Bridge {
     return this.deps.registry;
   }
 
+  /** 会话级操作的统一入口：把 sid 绑成 AgentSession（项目级操作仍走 this.client）。 */
+  private sessionFor(sessionId: string): AgentSession {
+    return new PiWebSession(this.client, sessionId);
+  }
+
   private async sendErr(chatId: string, msg: string): Promise<void> {
     await this.channel.send(chatId, { text: msg }).catch(() => {});
   }
@@ -85,7 +91,7 @@ export class Bridge {
   private async pruneDeadAgents(): Promise<number> {
     let n = 0;
     for (const e of this.registry.agentEntries()) {
-      const st = await this.client.getState(e.agentId).catch(() => null);
+      const st = await this.sessionFor(e.agentId).getState().catch(() => null);
       // 只清理真正无效的 agent（sid 不存在或已被删除）
       // 已回收的 agent（!running）还有历史消息，不应该清理
       if (!st) {
@@ -303,7 +309,7 @@ export class Bridge {
     label: string,
   ) {
     const runOnce = (aid: string) =>
-      runTurn(this.channel, this.client, chatId, aid, text, this.deps.pending, label);
+      runTurn(this.channel, this.sessionFor(aid), chatId, text, this.deps.pending, label);
     try {
       return await runOnce(agentId);
     } catch (e) {
@@ -357,7 +363,7 @@ export class Bridge {
       const cwd = this.registry.projectOf(evt.chatId);
       const agent = cwd ? this.registry.getAgent(cwd) : undefined;
       if (agent?.agentId) {
-        await this.client.abort(agent.agentId).catch((e) => log.warn('abort 失败', { e: String(e) }));
+        await this.sessionFor(agent.agentId).abort().catch((e) => log.warn('abort 失败', { e: String(e) }));
         await this.channel.send(evt.chatId, { text: '⏹ 已请求停止' }).catch(() => {});
       } else {
         await this.channel.send(evt.chatId, { text: '已经移除的 Agent' }).catch(() => {});
@@ -387,7 +393,7 @@ export class Bridge {
       return;
     }
     try {
-      await this.client.setModel(agent.agentId, provider, modelId);
+      await this.sessionFor(agent.agentId).setModel(provider, modelId);
       // 更新 registry 中记录的模型信息
       this.registry.updateAgentModel(cwd!, ref);
       // 刷新为状态卡（显示新当前模型）
@@ -429,7 +435,7 @@ export class Bridge {
         .updateCard(evt.messageId, statusCard({ currentCwd: cwd, projects, currentModelRef: curRef, models }))
         .catch(() => {});
       // 已在会话管理中也要发送 last 卡片
-      const st = await this.client.getState(tracked.agentId).catch(() => null);
+      const st = await this.sessionFor(tracked.agentId).getState().catch(() => null);
       await this.sendContextSummary(evt.chatId, tracked.agentId, !!st?.running);
       return;
     }
@@ -492,7 +498,7 @@ export class Bridge {
       let msgs: import('../piweb/types.ts').Message[] = [];
       let fetchError: unknown;
       try {
-        msgs = (await this.client.getSessionContext(currentSid, 30)).context.messages;
+        msgs = (await this.sessionFor(currentSid).getContext(30)).context.messages;
         log.info(`[fetchLatestReply] attempt=${attempt} sid=${currentSid.slice(-6)} msgs=${msgs.length}`);
       } catch (e) {
         fetchError = e;
@@ -575,7 +581,7 @@ export class Bridge {
 
     let modelRef: string | undefined;
     if (finalSid) {
-      const st = await this.client.getState(finalSid).catch(() => null);
+      const st = await this.sessionFor(finalSid).getState().catch(() => null);
       // agent 有进程活动 → 用当前配置的模型
       if (finalRunning || st?.running) {
         if (st?.state?.model) {
@@ -608,7 +614,7 @@ export class Bridge {
     const projects = await this.getProjects(true);
     const info = projects.find((p) => p.cwd === cwd);
     if (info?.activeSessionId) {
-      const st = await this.client.getState(info.activeSessionId).catch(() => null);
+      const st = await this.sessionFor(info.activeSessionId).getState().catch(() => null);
       if (st) {
         // 采纳为会话管理中的 agent（覆盖 registry 中的错误缓存）
         this.registry.adoptAgent(cwd, info.activeSessionId);
@@ -620,7 +626,7 @@ export class Bridge {
     // 2. pi-web 没有 → 查 registry 缓存（可能 pi-web 刚好没返回）
     const tracked = this.registry.getAgent(cwd);
     if (tracked?.agentId) {
-      const st = await this.client.getState(tracked.agentId).catch(() => null);
+      const st = await this.sessionFor(tracked.agentId).getState().catch(() => null);
       if (st) {
         log.info(`复用 registry agent ${tracked.agentId.slice(-6)} (cwd=${cwd}, running=${!!st.running})`);
         return { agentId: tracked.agentId, running: !!st.running };
@@ -665,7 +671,7 @@ export class Bridge {
   }
 
   private async currentModelRef(agentId: string): Promise<string | undefined> {
-    const s = await this.client.getState(agentId).catch(() => null);
+    const s = await this.sessionFor(agentId).getState().catch(() => null);
     const m = s?.state?.model;
     if (m) return `${m.provider}/${m.id}`;
     return this.deps.defaultModel
@@ -731,7 +737,7 @@ export class Bridge {
         const cwd = this.registry.projectOf(msg.chatId);
         const agent = cwd ? this.registry.getAgent(cwd) : undefined;
         if (agent?.agentId) {
-          await this.client.abort(agent.agentId).catch(() => {});
+          await this.sessionFor(agent.agentId).abort().catch(() => {});
           await reply('⏹ 已请求停止');
         } else {
           await reply('已经移除的 Agent');
@@ -769,7 +775,7 @@ export class Bridge {
         const entries = this.registry.agentEntries();
         const rows = await Promise.all(
           entries.map(async (e) => {
-            const st = await this.client.getState(e.agentId).catch(() => null);
+            const st = await this.sessionFor(e.agentId).getState().catch(() => null);
             const state = st?.running
               ? st.state?.isPromptRunning || st.state?.isStreaming
                 ? '🔴 运行中'
@@ -802,7 +808,7 @@ export class Bridge {
         }
         const sid = result.sid;
         try {
-          const st0 = await this.client.getState(sid).catch(() => null);
+          const st0 = await this.sessionFor(sid).getState().catch(() => null);
           const busy = !!st0?.running && !!(st0.state?.isPromptRunning || st0.state?.isStreaming);
           if (busy) {
             const snapshot = await this.client.getLiveProgress(sid);
@@ -826,9 +832,8 @@ export class Bridge {
             log.info(`[bot=${this.deps.botId}] /last 挂接执行中轮次 sid=${sid.slice(-6)}`);
             void attachRunningTurn(
               this.channel,
-              this.client,
+              this.sessionFor(sid),
               msg.chatId,
-              sid,
               this.deps.pending,
               projectLabel(cwd),
               snapshot,
@@ -846,7 +851,7 @@ export class Bridge {
           const lastText = r.text || '（无历史记录）';
           const modelRef = r.modelRef;
           // 当前 agent 状态（空闲 / 工作中 / 已回收）
-          const st = await this.client.getState(finalSid).catch(() => null);
+          const st = await this.sessionFor(finalSid).getState().catch(() => null);
           const state = st?.running
             ? st.state?.isPromptRunning || st.state?.isStreaming
               ? '🔴 工作中'
@@ -874,8 +879,8 @@ export class Bridge {
         const cwd = this.registry.projectOf(msg.chatId);
         const agent = cwd ? this.registry.getAgent(cwd) : undefined;
         if (!agent?.agentId) return reply('已经移除的 Agent');
-        await this.client
-          .setModel(agent.agentId, provider, modelId)
+        await this.sessionFor(agent.agentId)
+          .setModel(provider, modelId)
           .catch((e) => void reply(`❌ ${String(e).slice(0, 200)}`));
         await reply(`✅ 模型已设为 ${provider}/${modelId}（下一轮生效）`);
         break;

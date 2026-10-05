@@ -45,6 +45,9 @@ export class TerminalServer {
   private readonly pending = new Map<string, (res: TerminalResponse) => void>();
   private readonly factory?: TerminalSessionFactory;
   private port = 0;
+  /** 离线宽限期（spec 定为 60s）。 */
+  private readonly graceMs = 60_000;
+  private sweeper?: NodeJS.Timeout;
 
   constructor(factory?: TerminalSessionFactory) {
     this.factory = factory;
@@ -77,12 +80,18 @@ export class TerminalServer {
     const addr = this.server.address();
     this.port = typeof addr === 'object' && addr ? addr.port : 0;
     this.writeDiscovery();
+    // 周期清理离线超时的会话（断线不立即删，给重连留窗口）
+    this.sweeper = setInterval(() => this.pruneOffline(this.graceMs), 10_000);
     log.info(`终端接入服务已启动，监听 127.0.0.1:${this.port}`);
     return this.port;
   }
 
   /** 停止监听并清理发现文件。 */
   async stop(): Promise<void> {
+    if (this.sweeper) {
+      clearInterval(this.sweeper);
+      this.sweeper = undefined;
+    }
     for (const c of this.connections.values()) c.res.end();
     this.connections.clear();
     if (this.discoveryPath) {
@@ -135,6 +144,24 @@ export class TerminalServer {
     });
   }
 
+  /** 清理超过 graceMs 仍离线的会话（定时调用）。返回清理数。 */
+  pruneOffline(graceMs = 60_000): number {
+    const now = Date.now();
+    let n = 0;
+    for (const [sid, e] of [...this.entries]) {
+      // 在线的一律保留
+      if (e.online) continue;
+      if (now - e.lastSeenAt >= graceMs) {
+        this.entries.delete(sid);
+        this.connections.delete(sid);
+        this.listeners.delete(sid);
+        n++;
+        log.info(`清理离线超时的终端会话 ${sid.slice(-6)}`);
+      }
+    }
+    return n;
+  }
+
   /** 取某会话的 AgentSession（不存在则 undefined）。 */
   sessionFor(sessionId: string): AgentSession | undefined {
     return this.factory?.(sessionId);
@@ -183,19 +210,21 @@ export class TerminalServer {
       res.writeHead(204).end();
       return;
     }
-    // 会话注册
+    // 会话注册（重连时会重新 POST，幂等覆盖）
     if (req.method === 'POST' && path === '/terminal/register') {
       const info = await this.readJson<TerminalSessionInfo>(req);
       if (!info?.sessionId) {
         res.writeHead(400).end();
         return;
       }
+      const prev = this.entries.get(info.sessionId);
       this.entries.set(info.sessionId, {
         info,
-        connectedAt: Date.now(),
+        // 重连保留原始 connectedAt，便于观测存活时长
+        connectedAt: prev?.connectedAt ?? Date.now(),
         lastSeenAt: Date.now(),
         online: true,
-        busy: false,
+        busy: prev?.busy ?? false,
       });
       log.info(
         `终端会话注册 ${info.sessionId.slice(-6)} cwd=${info.cwd} pid=${info.pid ?? '?'}`,
@@ -236,10 +265,11 @@ export class TerminalServer {
         this.connections.delete(sessionId);
         const e = this.entries.get(sessionId);
         if (e) {
+          // 断线不删除，只标离线 —— 睡眠/网络抖动很快会恢复
           e.online = false;
           e.lastSeenAt = Date.now();
         }
-        log.info(`终端会话断开 ${sessionId.slice(-6)}（离线保留）`);
+        log.info(`终端会话断开 ${sessionId.slice(-6)}（离线保留，${this.graceMs / 1000}s 后清理）`);
       });
       return;
     }

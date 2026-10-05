@@ -13,10 +13,11 @@ Nightmanager implementation queue.
 
 ## Queue
 
-### 终端感知机器人（spec: `specs/draft-terminal-bot.md`）
+### 终端感知机器人（spec: `specs/terminal-bot.md`）
 
-- [ready] T1 抽取 AgentSession 接口
+- [done] T1 抽取 AgentSession 接口
   - Spec: `specs/terminal-bot.md`
+  - Commit: `4545eca`
   - Blocked by: None — can start immediately
   - Scope: 把 pi-web 侧的 agent 调用收拢到一个会话级接口，让后续终端支持只需再写一份实现；本片不改变任何现有行为。
   - Acceptance:
@@ -30,7 +31,7 @@ Nightmanager implementation queue.
 
 - [ready] T2 端到端最小闭环（终端会话可发现、可下发消息）
   - Spec: `specs/terminal-bot.md`
-  - Blocked by: T1 抽取 AgentSession 接口
+  - Blocked by: None — T1 已完成（`4545eca`）
   - Scope: 终端 pi 启动后其会话出现在 terminal 机器人的列表中，可被选中并向其下发一条消息，该消息出现在用户终端里。本片打通最窄路径，不含流式与审批。
   - Acceptance:
     - terminal 机器人可配置、可启动，且与其他两类机器人严格隔离（互相不可见）

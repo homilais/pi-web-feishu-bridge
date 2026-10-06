@@ -7,6 +7,42 @@
 
 ---
 
+## [Unreleased]
+
+### 新增（Added）
+
+- **终端感知机器人（`kind: pi-terminal`）**：终端里直接跑的 `pi` 可被飞书指挥，**不再强依赖 pi-web**
+  - `pi-web-feishu-bridge --install-extension` 一键安装 pi 扩展（随包分发，版本永不错位）
+  - 终端会话自动注册，`/agents` 可选中对话；同项目多终端不去重
+  - 流式卡片、审批双通道（先响应者胜）、`/abort` 可中止任意回合、`/last` 读真实历史且不过滤
+  - 断线标离线 → 60s 后移除；重连重取状态而非补发事件
+  - `kind` 缺省按 `cwds` 推断，**既有配置零修改**
+
+### 变更（Changed）
+
+- 配置新增 `kind`：`piweb-pool` / `piweb-scoped` / `pi-terminal`
+- 新增会话级抽象 `AgentSession`（`PiWebSession` 为其 pi-web 实现）；项目级操作仍留在 pi-web 路径
+- `/info` 支持终端感知机器人：列出已注册终端会话、下拉可切换、保留模型切换
+- 切换绑定后返回最后一次会话信息，与 pi-web 体验对齐（共用 `sendTerminalLastCard`）
+
+### 修复（Fixed）
+
+以下问题由真实使用测试发现并修复：
+
+- **机器人间会话管理未隔离** —— `TerminalServer` 曾被无条件注入所有机器人，导致 pi-web 机器人的 `/agents` 显示终端会话、消息被下发给终端。现仅 `kind: pi-terminal` 注入
+- **只接管交互式终端的 pi** —— pi 的扩展在 `rpc`/`json`/`print` 模式同样加载，原先无模式判别，pi-web 拉起的每个 agent 都会把自己注册成终端会话。现以 `ctx.mode === 'tui'` 为准
+- **绑定键不一致** —— `handleSwitch` 的读写漏传 `botId`，导致切换成功后 `/last` 读不到绑定
+- **`/agents` 无法选中终端会话** —— 卡片按钮未携带 `sessionId`，范围校验恒为 false
+- **终端会话重复注册** —— 事件处理器注册在 `session_start` 内部；已加进程级幂等守卫与按 pid 去重
+- **恢复会话后立即发消息失败** —— 注册与下行 SSE 之间存在窗口，现由 `dispatchWhenReady` 等待就绪
+- **pi-web 采纳终端会话** —— 两者共用同一份会话存储，`listProjects` 现排除已注册的终端会话，避免两个 pi 进程写同一 session 文件
+
+### 安全（Security）
+
+- 桥接为终端接入新增**仅本机监听**（`127.0.0.1`）且**不做 token 认证** —— 同机任何进程可驱动你的 pi。使用前请确认机器环境可信。
+- 审批闸门由扩展充当（pi 无内置审批），需 `PI_FEISHU_GATE=1` 显式开启
+
+---
 ## [0.2.1] - 2026-10-05
 
 ### 变更（Changed）

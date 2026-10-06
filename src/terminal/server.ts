@@ -217,6 +217,18 @@ export class TerminalServer {
         res.writeHead(400).end();
         return;
       }
+      // 同一 pid 重复注册（session_start 多次触发 / 会话 id 跨进程复用）时，
+      // 先清掉该 pid 的旧条目，避免 /agents 出现同一 pid 的多条。
+      if (info.pid) {
+        for (const [sid, e] of [...this.entries]) {
+          if (sid !== info.sessionId && e.info.pid === info.pid) {
+            this.entries.delete(sid);
+            this.connections.delete(sid);
+            this.listeners.delete(sid);
+            log.info(`同一 pid ${info.pid} 重复注册，移除旧会话 ${sid.slice(-6)}`);
+          }
+        }
+      }
       const prev = this.entries.get(info.sessionId);
       this.entries.set(info.sessionId, {
         info,

@@ -146,9 +146,16 @@ function noticeOnce(ctx: ExtensionContext): void {
   ctx.ui.notify?.(NOTICE, 'info');
 }
 
+/** 进程级连接标志，避免 session_start 多次触发时重复注册终端会话。 */
+let attached = false;
+
 export default function (pi: ExtensionAPI): void {
   // 不在 factory 里起 socket —— 某些调用加载扩展但不开会话
   pi.on('session_start', async (_ev, ctx) => {
+    // 同一进程只允许一条通道：session_start 可能触发多次（续接/重载会话），
+    // 重复连接会产生重复注册，使飞书 /agents 出现同一 pid 的多条。
+    if (attached) return;
+    attached = true;
     const port = await probeBridge();
     if (port === null) {
       noticeOnce(ctx);
@@ -321,6 +328,7 @@ export default function (pi: ExtensionAPI): void {
       clearInterval(timer);
       offEvent?.();
       controller.abort();
+      attached = false; // 允许下个会话重新连接
     });
 
     // 4b. 工具执行审批闸门（可选）

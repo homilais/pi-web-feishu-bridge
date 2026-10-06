@@ -10,8 +10,9 @@
 //   pi-web-feishu-bridge --env <path>     指定 .env 文件（用于 PIWEB_PASSWORD 等环境变量）
 //   pi-web-feishu-bridge --cwd <dir>      切换到指定目录再启动
 import { main as runBridge } from './index.js';
-import { readFileSync, writeFileSync, existsSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, resolve, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configYamlTemplate } from './config.js';
 
@@ -37,6 +38,7 @@ pi-web-feishu-bridge — 飞书远程指挥 pi 编码 agent 的桥接（多机�
   --version, -v           显示版本号
   --init                  在当前目录生成 config.yaml 模板并退出
   --config <path>         指定配置文件（yaml/json，默认 ./config.yaml）
+  --install-extension     把 pi 扩展装到 ~/.pi/agent/extensions/ 并退出
   --env <path>            指定 .env 文件（用于 PIWEB_PASSWORD 等环境变量）
   --cwd <dir>             切换到指定目录再启动
 
@@ -51,6 +53,11 @@ pi-web-feishu-bridge — 飞书远程指挥 pi 编码 agent 的桥接（多机�
   3. pi-web-feishu-bridge --init          # 生成 config.yaml 模板
   4. $EDITOR config.yaml                 # 填飞书凭据与 cwd
   5. PIWEB_PASSWORD=xxx pi-web-feishu-bridge   # 启动服务
+
+用终端感知机器人（不依赖 pi-web）:
+  1. pi-web-feishu-bridge --install-extension   # 装 pi 扩展
+  2. config.yaml 中配一个 kind: pi-terminal 的机器人
+  3. 启动桥接后直接跑 pi，终端会话会出现在飞书 /agents
 
 故障排查:
   连不上 pi-web 会直接退出（exit 1），日志打印原因。
@@ -71,6 +78,33 @@ function runInit(): void {
   console.log(`✓ 已生成 ${path}`);
   console.log(`  下一步: $EDITOR ${path}`);
   console.log(`  填好飞书凭据与 cwd 后运行: PIWEB_PASSWORD=xxx pi-web-feishu-bridge`);
+}
+
+function runInstallExtension(): void {
+  const src = resolve(__dirname, 'terminal/extension/pi-feishu.ts');
+  if (!existsSync(src)) {
+    console.error(`✗ 包内缺少扩展文件：${src}`);
+    console.error('  可能未完成构建，请重新安装或先运行 npm run build。');
+    process.exit(1);
+  }
+  const dir = join(homedir(), '.pi', 'agent', 'extensions');
+  mkdirSync(dir, { recursive: true });
+  const dest = join(dir, 'pi-feishu.ts');
+
+  // 内容一致则不重复写入，避免无谓地改用户文件时间戳
+  if (existsSync(dest) && readFileSync(dest, 'utf8') === readFileSync(src, 'utf8')) {
+    console.log(`✓ 扩展已是最新：${dest}`);
+  } else {
+    const overwrote = existsSync(dest);
+    copyFileSync(src, dest);
+    console.log(`✓ ${overwrote ? '已更新' : '已安装'}扩展：${dest}`);
+  }
+  console.log('');
+  console.log('接下来：');
+  console.log('  1. 启动桥接（需在 config.yaml 里配置一个 kind: pi-terminal 机器人）');
+  console.log('  2. 直接运行 pi —— 终端会话会自动注册，在飞书 /agents 中即可选中');
+  console.log('');
+  console.log('桥接未启动时扩展会静默降级，不影响本地使用（提示一次，可用 PI_FEISHU_QUIET=1 静音）。');
 }
 
 function loadEnvFile(path: string): void {
@@ -106,6 +140,10 @@ async function cli(): Promise<void> {
   }
   if (args.includes('--init')) {
     runInit();
+    return;
+  }
+  if (args.includes('--install-extension')) {
+    runInstallExtension();
     return;
   }
 
@@ -151,7 +189,10 @@ async function cli(): Promise<void> {
   }
 
   // 检查未知选项
-  const known = new Set(['--help', '-h', '--version', '-v', '--init', '--config', '--env', '--cwd']);
+  const known = new Set([
+    '--help', '-h', '--version', '-v', '--init', '--install-extension',
+    '--config', '--env', '--cwd',
+  ]);
   for (const a of args) {
     if (a.startsWith('-') && !known.has(a)) {
       console.error(`未知选项: ${a}`);

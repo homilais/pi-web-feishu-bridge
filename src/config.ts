@@ -12,15 +12,23 @@ import { logger } from './log.ts';
 
 const log = logger('config');
 
+/** 机器人类型：
+ *  - `piweb-pool`   默认机器人（cwds 为空），可绑 pi-web 全集减去他人声明的
+ *  - `piweb-scoped` 限定机器人，可绑自身 cwds ∩ pi-web
+ *  - `pi-terminal`  终端感知机器人，可绑已注册的终端 pi 会话（不声明 cwds）
+ *  kind 缺省时按 cwds 推断（空→piweb-pool / 非空→piweb-scoped），保证既有配置无需修改。 */
+export type BotKind = 'piweb-pool' | 'piweb-scoped' | 'pi-terminal';
+
 export interface BotConfig {
   id: string;
+  kind: BotKind;
   appId: string;
   appSecret: string;
-  /** 该机器人绑定的 cwd 列表（已 resolve 规范化）。空数组 = 默认机器人。 */
+  /** 该机器人绑定的 cwd 列表（已 resolve 规范化）。仅 piweb-scoped 非空。 */
   cwds: string[];
   allowOpenIds: string[];
   groupAllowlist: string[];
-  /** 是否为默认机器人（cwds 为空）。 */
+  /** 是否为默认机器人（kind === 'piweb-pool'）。 */
   readonly isDefault: boolean;
 }
 
@@ -67,6 +75,8 @@ function findConfigFile(): string | undefined {
 
 interface RawBot {
   id?: string;
+  /** 可选；缺省时按 cwds 推断。 */
+  kind?: string;
   appId?: string;
   appSecret?: string;
   cwds?: string[];
@@ -109,6 +119,7 @@ function loadFromEnv(): AppConfig {
 
   const bot: BotConfig = {
     id: 'default',
+    kind: 'piweb-pool',
     appId,
     appSecret,
     cwds: [],
@@ -127,15 +138,31 @@ function normalizeBot(b: RawBot): BotConfig {
   const appId = (b.appId ?? '').trim();
   const appSecret = (b.appSecret ?? '').trim();
   const cwds = (b.cwds ?? []).map((c) => resolve(String(c).trim())).filter(Boolean);
+  const kind = resolveKind(b.kind, cwds, id);
   return {
     id,
+    kind,
     appId,
     appSecret,
     cwds,
     allowOpenIds: (b.allowOpenIds ?? []).map((s) => String(s).trim()).filter(Boolean),
     groupAllowlist: (b.groupAllowlist ?? []).map((s) => String(s).trim()).filter(Boolean),
-    isDefault: cwds.length === 0,
+    isDefault: kind === 'piweb-pool',
   };
+}
+
+const BOT_KINDS: BotKind[] = ['piweb-pool', 'piweb-scoped', 'pi-terminal'];
+
+/** kind 缺省时按现有规则推断，保持既有配置零修改。 */
+function resolveKind(raw: string | undefined, cwds: string[], botId: string): BotKind {
+  if (!raw || !raw.trim()) return cwds.length === 0 ? 'piweb-pool' : 'piweb-scoped';
+  const k = raw.trim() as BotKind;
+  if (!BOT_KINDS.includes(k)) {
+    throw new Error(
+      `[config] 机器人 ${botId} 的 kind="${raw}" 无效，可选：${BOT_KINDS.join(' / ')}`,
+    );
+  }
+  return k;
 }
 
 function parseDefaultModel(raw?: string): { provider: string; modelId: string } | undefined {
@@ -176,10 +203,24 @@ function validateBots(bots: BotConfig[], piwebPassword: string, source: string):
       `[config] 默认机器人（不指定 cwds）最多 1 个，现有 ${defaults.length} 个：${defaults.map((b) => b.id).join(', ')}`,
     );
   }
+  // 终端感知机器人 ≤ 1，且不得声明 cwds（语义冲突）
+  const terminals = bots.filter((b) => b.kind === 'pi-terminal');
+  if (terminals.length > 1) {
+    throw new Error(
+      `[config] 终端感知机器人（kind: pi-terminal）最多 1 个，现有 ${terminals.length} 个：${terminals.map((b) => b.id).join(', ')}`,
+    );
+  }
+  for (const b of terminals) {
+    if (b.cwds.length) {
+      throw new Error(
+        `[config] 机器人 ${b.id} 同时声明了 kind: pi-terminal 与 cwds，语义冲突。\n  终端感知机器人自动发现终端 pi 会话，不应配置 cwds。`,
+      );
+    }
+  }
   // 限定机器人 cwds 全局不重复（一个 cwd 只归属一个机器人）
   const cwdOwner = new Map<string, string>(); // cwd → botId
   for (const b of bots) {
-    if (b.isDefault) continue;
+    if (b.kind !== 'piweb-scoped') continue;
     for (const cwd of b.cwds) {
       const prev = cwdOwner.get(cwd);
       if (prev) {

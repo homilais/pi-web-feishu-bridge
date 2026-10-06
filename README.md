@@ -140,6 +140,39 @@ pi-web-feishu-bridge --help
 
 > 要多机器人按项目隔离时，**每个机器人 = 一个独立飞书应用**，上述步骤逐个走完。
 
+**第三类机器人：`kind: pi-terminal`（不依赖 pi-web）**
+
+除了连接 pi-web，你也可以让**终端里跑的 `pi`** 被飞书直接指挥：
+
+```bash
+# 1. 装 pi 扩展（随本包分发，版本与桥接永不错位）
+pi-web-feishu-bridge --install-extension
+
+# 2. config.yaml 里加一个终端机器人（需另一个飞书应用）
+#    - id: term
+#      kind: pi-terminal
+#      appId: cli_xxx
+#      appSecret: yyy
+
+# 3. 启动桥接后，直接在终端跑 pi
+pi
+```
+
+终端会话会自动注册，在该机器人的 `/agents` 里选中即可对话。
+
+| 特性 | 说明 |
+|---|---|
+| 可绑定集合 | 仅终端 pi 会话，**与 pi-web 机器人完全隔离** |
+| 可见范围 | 仅状态可见；**你在终端的人机对话不会镜像到飞书** |
+| `/last` | 读 pi 的真实会话历史，**不过滤**（含你在终端发起的回合） |
+| `/switch` | 在**终端进程之间**切换（同项目开两个终端 → 两条可选） |
+| `/abort` | 飞书**可中止任何回合**，含你在终端发起的 |
+| 审批 | 默认关闭；`PI_FEISHU_GATE=1` 开启后，飞书发起回合的审批在终端与飞书同时出现、先响应者胜 |
+| 安全边界 | 桥接仅监听 `127.0.0.1` 且**不做 token 认证** —— 同机任何进程可驱动你的 pi（等同于暴露终端 shell） |
+
+> `kind` 缺省时按 `cwds` 推断（空→`piweb-pool` / 非空→`piweb-scoped`），**既有配置无需修改**。
+> 详见 [`docs/USAGE.md`](./docs/USAGE.md) 与 [`specs/terminal-bot.md`](./specs/terminal-bot.md)。
+
 #### 4. 配置
 
 ```bash

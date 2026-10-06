@@ -53,7 +53,14 @@ src/
 
 - 启动：`loadConfig` 解析 YAML + 严格校验（id/appId 唯一、默认≤1、cwd 不重复）
 - 共享一个 `PiWebClient`；每机器人独立 `channel`/`registry`(`registry.<botId>.json`)/`bridge`
+- **第三类** `pi-terminal`：可绑终端 pi 会话，与前两类严格隔离
 - `Bridge.isCwdInScope()` 按配置级判断范围；`getProjects()` 仅返回本机器人可绑项目
+- **终端接入**（`src/terminal/`）：pi 无入站端口，故扩展主动外连
+  - `server.ts` 仅监听 `127.0.0.1`（无 token，同机可访问），写发现文件 `~/.pi-bridge/bridge.json`
+  - 下行 SSE（prompt/abort/setModel/pullState/resolveApproval）+ 上行批量 POST（200ms 合并）
+  - `merge.ts` 合并相邻 `text_delta`（追加语义，丢字即永久丢失）；其余事件不可丢
+  - 扩展随包分发 + `install-extension`，版本与桥接永不错位
+  - 审批闸门由扩展充当（pi 无内置审批），需 `PI_FEISHU_GATE=1` 显式开启
 - `pruneOutOfScope()` 启动时清理范围外的旧绑定（配置变更后避免脏数据）
 - `/info` 下拉按可绑集合过滤，前置卡死，避免选了不能绑
 

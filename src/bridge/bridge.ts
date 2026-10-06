@@ -7,15 +7,23 @@ import type { QueueMap, PendingApprovals } from './queue.ts';
 import { projectLabel } from '../config.ts';
 import type { ProjectInfo, RpcCommand, ModelsEnabledResponse } from '../piweb/types.ts';
 import { PiWebHttpError } from '../piweb/client.ts';
+import type { TerminalServer } from '../terminal/server.ts';
 import { runTurn, attachRunningTurn } from './streamer.ts';
+import { PiWebSession, type AgentSession } from './agent-session.ts';
 import {
   statusCard,
   confirmCard,
   lastReplyCard,
   agentsCard,
   progressCard,
+  streamCard,
+  terminalInfoCard,
 } from '../feishu/cards.ts';
+import { TurnState } from './turn-state.ts';
 import { logger } from '../log.ts';
+
+/** 流式卡片刷新间隔（与 streamer 一致）。 */
+const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 const log = logger('bridge');
 
@@ -36,6 +44,8 @@ export interface BridgeDeps {
   defaultModel?: { provider: string; modelId: string };
   allowOpenIds: string[];
   groupAllowlist: string[];
+  /** 终端接入服务（仅 pi-terminal 机器人注入，其余为 undefined）。 */
+  terminal?: TerminalServer;
 }
 
 export class Bridge {
@@ -59,6 +69,11 @@ export class Bridge {
   }
   private get registry() {
     return this.deps.registry;
+  }
+
+  /** 会话级操作的统一入口：把 sid 绑成 AgentSession（项目级操作仍走 this.client）。 */
+  private sessionFor(sessionId: string): AgentSession {
+    return new PiWebSession(this.client, sessionId);
   }
 
   private async sendErr(chatId: string, msg: string): Promise<void> {
@@ -85,7 +100,7 @@ export class Bridge {
   private async pruneDeadAgents(): Promise<number> {
     let n = 0;
     for (const e of this.registry.agentEntries()) {
-      const st = await this.client.getState(e.agentId).catch(() => null);
+      const st = await this.sessionFor(e.agentId).getState().catch(() => null);
       // 只清理真正无效的 agent（sid 不存在或已被删除）
       // 已回收的 agent（!running）还有历史消息，不应该清理
       if (!st) {
@@ -128,7 +143,70 @@ export class Bridge {
   }
 
   /** 发 /info 卡片。notice：卡片顶部提示条（与文本合并成一条消息）。 */
+  /** 终端会话的「最后一次消息」卡片 —— /last 与切换绑定后共用，
+   *  使终端与 pi-web 的切换体验一致（切换后立刻看到上下文摘要）。 */
+  private async sendTerminalLastCard(chatId: string, sessionId: string, notice?: string): Promise<void> {
+    const t = this.deps.terminal;
+    if (!t) return;
+    const entry = t.listSessions().find((e) => e.info.sessionId === sessionId);
+    const res = await t.request(sessionId, { type: 'pullState', requestId: crypto.randomUUID() });
+    if (!res) {
+      await this.sendErr(chatId, '❌ 终端会话无响应（可能已离线），请稍后重试');
+      return;
+    }
+    const text = latestAssistantText(res.entries);
+    const label = entry?.info.label ?? projectLabel(entry?.info.cwd ?? '');
+    const state = res.idle ? '🟢 空闲' : '🔴 工作中';
+    await this.sendRouteCard(
+      chatId,
+      lastReplyCard({
+        projectLabel: label,
+        modelRef: res.model,
+        state,
+        text: text || '（暂无文本回复）',
+      }),
+      entry?.info.cwd,
+      sessionId,
+    );
+    if (notice) await this.sendErr(chatId, notice);
+  }
+
+  /** 取终端会话当前模型（复用 T5 的 pullState 通路）。 */
+  private async terminalModelRef(sessionId: string): Promise<string | undefined> {
+    const res = await this.deps.terminal!.request(sessionId, {
+      type: 'pullState',
+      requestId: crypto.randomUUID(),
+    });
+    return res?.model;
+  }
+
   private async sendInfoCard(chatId: string, notice?: string): Promise<void> {
+    // 终端感知机器人：/info 展示已注册的终端会话（而非 pi-web 项目）
+    if (this.deps.terminal) {
+      const t = this.deps.terminal;
+      const bound = t.boundSession(chatId, this.deps.botId);
+      const sessions = t.listSessions().map((e) => ({
+        cwd: e.info.cwd,
+        label: `${e.info.label ?? projectLabel(e.info.cwd)} · pid ${e.info.pid}`,
+        agentId: e.info.sessionId,
+        state: e.online ? (e.busy ? '🔴 运行中' : '🟢 空闲') : '⚪ 离线',
+        sessionId: e.info.sessionId,
+      }));
+      const models = bound ? await this.getModelsCached() : null;
+      await this.sendRouteCard(
+        chatId,
+        terminalInfoCard({
+          currentSessionId: bound,
+          sessions,
+          currentModelRef: bound ? await this.terminalModelRef(bound).catch(() => undefined) : undefined,
+          models,
+          notice,
+        }),
+        bound ? sessions.find((s) => s.sessionId === bound)?.cwd : undefined,
+        bound,
+      );
+      return;
+    }
     await this.pruneDeadAgents(); // 先清理已回收的再展示
     const projects = await this.getProjects(true);
     const cur = this.registry.projectOf(chatId);
@@ -150,7 +228,13 @@ export class Bridge {
       return this.projectCache.data;
     }
     try {
-      const enumerated = await this.client.listProjects();
+      // 排除终端 pi 的会话：pi-web 与终端 pi 共用同一份会话存储，
+      // 不排除的话 pi-web 可能选中终端正在跑的会话作为本 cwd 的代表 agent，
+      // 导致两个 pi 进程写同一个 session 文件。
+      const terminalIds = new Set(
+        this.deps.terminal?.listSessions().map((e) => e.info.sessionId) ?? [],
+      );
+      const enumerated = await this.client.listProjects(terminalIds);
       const map = new Map<string, ProjectInfo>();
       for (const p of enumerated) {
         // 按本机器人范围过滤：默认机器人排除限定机器人声明的 cwd；限定机器人只留 declaredCwds
@@ -266,6 +350,13 @@ export class Bridge {
       await this.sendInfoCard(msg.chatId, '还没选择项目，请从下方「切换项目」下拉选一个：');
       return;
     }
+
+    // 终端感知机器人：直接向已注册的终端会话下发，并挂一张流式卡片
+    if (this.deps.terminal) {
+      await this.runTerminalTurn(msg.chatId, cwd, text);
+      return;
+    }
+
     const project = (await this.getProjects()).find((p) => p.cwd === cwd);
     if (!project) {
       await this.sendErr(msg.chatId, `⚠️ 未找到项目 ${cwd}`);
@@ -294,6 +385,77 @@ export class Bridge {
     });
   }
 
+  /** 终端会话的一轮：先挂流式卡片（订阅上行事件），再下发 prompt。
+   *  顺序很重要 —— 先订阅后下发，避免极快完成的轮次丢事件。 */
+  private async runTerminalTurn(chatId: string, cwd: string, text: string): Promise<void> {
+    const terminal = this.deps.terminal;
+    if (!terminal) return;
+    // 优先用 /switch 绑定的 sessionId（同 cwd 可多终端，不能靠 cwd 猜）
+    const bound = terminal.boundSession(chatId, this.deps.botId);
+    let entry = bound
+      ? terminal.listSessions().find((e) => e.info.sessionId === bound)
+      : undefined;
+    if (!entry) {
+      // 未绑定：取该 cwd 下最近注册且在线的会话
+      const sessions = terminal.listSessions().filter((e) => e.info.cwd === cwd && e.online);
+      if (!sessions.length) {
+        await this.sendErr(
+          chatId,
+          `⚠️ 没有在线的终端会话（cwd=${cwd}），请先在终端启动 pi，或用 /switch 选择`,
+        );
+        return;
+      }
+      entry = sessions[sessions.length - 1];
+      terminal.bindChat(chatId, entry.info.sessionId, this.deps.botId);
+    }
+    const sessionId = entry.info.sessionId;
+    const label = entry.info.label ?? projectLabel(cwd);
+
+    const turnId = crypto.randomUUID();
+    const turn = new TurnState(turnId, text);
+    const unsubscribe = terminal.onSessionEvent(sessionId, (ev) => turn.handleEvent(ev, this.deps.pending));
+
+    try {
+      const streamP = this.channel.stream(
+        chatId,
+        {
+          card: {
+            initial: streamCard(turn, label),
+            producer: async (ctl) => {
+              let lastSig = turn.signature();
+              while (!turn.done && Date.now() < turn.deadline) {
+                await sleep(450);
+                const sig = turn.signature();
+                if (sig !== lastSig) {
+                  await ctl.update(streamCard(turn, label)).catch(() => {});
+                  lastSig = sig;
+                }
+              }
+              await ctl.update(streamCard(turn, label)).catch(() => {});
+            },
+          },
+        },
+        { replyTo: undefined },
+      );
+
+      // 先把 prompt 下发到终端
+      const ok = await terminal.dispatchWhenReady(sessionId, { type: 'prompt', requestId: turnId, text });
+      if (!ok) {
+        await this.sendErr(chatId, '❌ 终端会话已离线，请重试');
+        unsubscribe();
+        return;
+      }
+      const result = await streamP;
+      if (result.messageId) this.registry.rememberRoute(result.messageId, cwd, sessionId);
+      log.info(`[terminal] 轮次结束 ${turnId.slice(-6)} status=${turn.status} 文本=${turn.text.length}字`);
+    } catch (e) {
+      log.error('[terminal] 轮次异常', e);
+      await this.sendErr(chatId, `❌ 内部错误：${String(e).slice(0, 200)}`);
+    } finally {
+      unsubscribe();
+    }
+  }
+
   /** 404 自愈：agent 失效时清除记录重建一次。 */
   private async executeTurn(
     chatId: string,
@@ -303,7 +465,7 @@ export class Bridge {
     label: string,
   ) {
     const runOnce = (aid: string) =>
-      runTurn(this.channel, this.client, chatId, aid, text, this.deps.pending, label);
+      runTurn(this.channel, this.sessionFor(aid), chatId, text, this.deps.pending, label);
     try {
       return await runOnce(agentId);
     } catch (e) {
@@ -337,6 +499,10 @@ export class Bridge {
     if (cmd === 'select' && sel) {
       if (sel.startsWith('model:')) return this.handleSetModel(evt, sel.slice(6));
       if (sel.startsWith('project:')) return this.handleSwitch(evt, sel.slice(8));
+        // /info 的终端会话下拉：值形如 terminal:<sessionId>
+        if (sel.startsWith('terminal:')) {
+          return this.handleSwitch(evt, '', sel.slice(9));
+        }
     }
     // 兼容旧按钮
     if (cmd === 'setmodel') {
@@ -345,11 +511,26 @@ export class Bridge {
     }
     if (cmd === 'switch') {
       const cwd = String(v.cwd ?? '');
-      if (cwd) return this.handleSwitch(evt, cwd);
+      // 终端会话按钮会带 sessionId（同 cwd 可多终端，cwd 不足以定位）
+      if (cwd) return this.handleSwitch(evt, cwd, v.sessionId ? String(v.sessionId) : undefined);
       return;
     }
     if (cmd === 'approve' || cmd === 'reject') {
       const requestId = String(v.requestId ?? '');
+      // 终端会话：审批结论需下发到扩展，由扩展的竞速逻辑撤掉终端弹窗
+      if (this.deps.terminal) {
+        const sid = this.deps.terminal.boundSession(evt.chatId, this.deps.botId);
+        if (sid) {
+          this.deps.terminal.dispatch(sid, {
+            type: 'resolveApproval',
+            requestId,
+            approved: cmd === 'approve',
+          });
+        }
+        // 仍需 resolve 本地 pending，否则 TurnState 状态机不推进、卡片卡在 awaiting_approval
+        this.deps.pending.resolve(requestId, cmd === 'approve', v);
+        return;
+      }
       this.deps.pending.resolve(requestId, cmd === 'approve', v);
       return;
     }
@@ -357,7 +538,7 @@ export class Bridge {
       const cwd = this.registry.projectOf(evt.chatId);
       const agent = cwd ? this.registry.getAgent(cwd) : undefined;
       if (agent?.agentId) {
-        await this.client.abort(agent.agentId).catch((e) => log.warn('abort 失败', { e: String(e) }));
+        await this.sessionFor(agent.agentId).abort().catch((e) => log.warn('abort 失败', { e: String(e) }));
         await this.channel.send(evt.chatId, { text: '⏹ 已请求停止' }).catch(() => {});
       } else {
         await this.channel.send(evt.chatId, { text: '已经移除的 Agent' }).catch(() => {});
@@ -387,7 +568,7 @@ export class Bridge {
       return;
     }
     try {
-      await this.client.setModel(agent.agentId, provider, modelId);
+      await this.sessionFor(agent.agentId).setModel(provider, modelId);
       // 更新 registry 中记录的模型信息
       this.registry.updateAgentModel(cwd!, ref);
       // 刷新为状态卡（显示新当前模型）
@@ -406,7 +587,31 @@ export class Bridge {
    *  2. 不在 → 寻找已有 agentId 纳入会话管理（优先 running，然后非 running 历史）
    *  3. 未找到 → 更新项目列表让重新选择
    *  4. 找到 → 纳入 + 绑定 + 发送 last 卡片 */
-  private async handleSwitch(evt: CardActionEvent, cwd: string): Promise<void> {
+  private async handleSwitch(evt: CardActionEvent, cwd: string, sessionId?: string): Promise<void> {
+    // 终端会话：按 sessionId 绑定（/agents 卡片按钮会带；同 cwd 可多终端，cwd 不足以定位）
+    if (this.deps.terminal) {
+      const t = this.deps.terminal;
+      const sid = sessionId ?? t.boundSession(evt.chatId, this.deps.botId);
+      if (sid) {
+        const entry = t.listSessions().find((e) => e.info.sessionId === sid);
+        if (!entry) {
+          await this.sendErr(evt.chatId, '⚠️ 该终端会话已不可用（可能已退出），请重新 /agents 选择');
+          return;
+        }
+        t.bindChat(evt.chatId, sid, this.deps.botId);
+        this.registry.bindProject(evt.chatId, entry.info.cwd);
+        const label = entry.info.label ?? projectLabel(entry.info.cwd);
+        // 与 pi-web 对齐：切换绑定后立刻返回最后一次会话信息，而非只提示成功
+        await this.sendTerminalLastCard(
+          evt.chatId,
+          sid,
+          `✅ 已选中终端会话 ${label}（pid ${entry.info.pid}）${entry.online ? '' : ' ⚠️ 当前离线'}`,
+        );
+        return;
+      }
+      await this.sendErr(evt.chatId, '⚠️ 请从 /agents 卡片中选择一个终端会话');
+      return;
+    }
     // 防御性范围校验：配置级不允许的 cwd 拒绝绑定（下拉已过滤，这里防越界）
     if (!this.isCwdInScope(cwd)) {
       await this.sendErr(
@@ -429,7 +634,7 @@ export class Bridge {
         .updateCard(evt.messageId, statusCard({ currentCwd: cwd, projects, currentModelRef: curRef, models }))
         .catch(() => {});
       // 已在会话管理中也要发送 last 卡片
-      const st = await this.client.getState(tracked.agentId).catch(() => null);
+      const st = await this.sessionFor(tracked.agentId).getState().catch(() => null);
       await this.sendContextSummary(evt.chatId, tracked.agentId, !!st?.running);
       return;
     }
@@ -492,7 +697,7 @@ export class Bridge {
       let msgs: import('../piweb/types.ts').Message[] = [];
       let fetchError: unknown;
       try {
-        msgs = (await this.client.getSessionContext(currentSid, 30)).context.messages;
+        msgs = (await this.sessionFor(currentSid).getContext(30)).context.messages;
         log.info(`[fetchLatestReply] attempt=${attempt} sid=${currentSid.slice(-6)} msgs=${msgs.length}`);
       } catch (e) {
         fetchError = e;
@@ -575,7 +780,7 @@ export class Bridge {
 
     let modelRef: string | undefined;
     if (finalSid) {
-      const st = await this.client.getState(finalSid).catch(() => null);
+      const st = await this.sessionFor(finalSid).getState().catch(() => null);
       // agent 有进程活动 → 用当前配置的模型
       if (finalRunning || st?.running) {
         if (st?.state?.model) {
@@ -608,7 +813,7 @@ export class Bridge {
     const projects = await this.getProjects(true);
     const info = projects.find((p) => p.cwd === cwd);
     if (info?.activeSessionId) {
-      const st = await this.client.getState(info.activeSessionId).catch(() => null);
+      const st = await this.sessionFor(info.activeSessionId).getState().catch(() => null);
       if (st) {
         // 采纳为会话管理中的 agent（覆盖 registry 中的错误缓存）
         this.registry.adoptAgent(cwd, info.activeSessionId);
@@ -620,7 +825,7 @@ export class Bridge {
     // 2. pi-web 没有 → 查 registry 缓存（可能 pi-web 刚好没返回）
     const tracked = this.registry.getAgent(cwd);
     if (tracked?.agentId) {
-      const st = await this.client.getState(tracked.agentId).catch(() => null);
+      const st = await this.sessionFor(tracked.agentId).getState().catch(() => null);
       if (st) {
         log.info(`复用 registry agent ${tracked.agentId.slice(-6)} (cwd=${cwd}, running=${!!st.running})`);
         return { agentId: tracked.agentId, running: !!st.running };
@@ -665,7 +870,7 @@ export class Bridge {
   }
 
   private async currentModelRef(agentId: string): Promise<string | undefined> {
-    const s = await this.client.getState(agentId).catch(() => null);
+    const s = await this.sessionFor(agentId).getState().catch(() => null);
     const m = s?.state?.model;
     if (m) return `${m.provider}/${m.id}`;
     return this.deps.defaultModel
@@ -711,6 +916,37 @@ export class Bridge {
         break;
       }
       case 'switch': {
+        // 终端感知：/switch = 在**终端进程之间**切换（不去重，同 cwd 可多个）
+        if (this.deps.terminal) {
+          const t = this.deps.terminal;
+          const all = t.listSessions();
+          if (!all.length) {
+            await reply('还没有终端会话。请先在终端运行 pi。');
+            break;
+          }
+          const target = rest
+            ? all.find(
+                (e) =>
+                  e.info.sessionId === rest ||
+                  (e.info.label ?? '').includes(rest) ||
+                  String(e.info.pid) === rest,
+              )
+            : undefined;
+          if (rest && !target) {
+            const list = all
+              .map((e) => `${e.info.label ?? '?'}(pid ${e.info.pid})${e.online ? '' : ' [离线]'}`)
+              .join('、');
+            await reply(`没找到终端会话「${rest}」。已知会话：${list}`);
+            break;
+          }
+          const chosen = target ?? all[all.length - 1];
+          t.bindChat(msg.chatId, chosen.info.sessionId, this.deps.botId);
+          this.registry.bindProject(msg.chatId, chosen.info.cwd);
+          await reply(
+            `✅ 已切换到终端会话 ${chosen.info.label ?? '?'}（pid ${chosen.info.pid}）${chosen.online ? '' : ' ⚠️ 该会话当前离线'}`,
+          );
+          break;
+        }
         // 无参不做特判，统一落到「未知指令」→ help 卡
         if (!rest) return replyCard(this.helpCard());
         const cwd = await this.resolveCwd(rest);
@@ -728,10 +964,21 @@ export class Bridge {
         break;
       }
       case 'abort': {
+        // 终端会话：飞书可中止**任何**回合（含用户在终端发起的）—— 中止是收回控制权
+        if (this.deps.terminal) {
+          const sid = this.deps.terminal.boundSession(msg.chatId, this.deps.botId);
+          if (!sid) return reply('当前会话未绑定终端 pi，请先 /switch 选择');
+          const ok = this.deps.terminal.dispatch(sid, {
+            type: 'abort',
+            requestId: crypto.randomUUID(),
+          });
+          await reply(ok ? '⏹ 已请求停止' : '❌ 终端会话已离线，无法停止');
+          break;
+        }
         const cwd = this.registry.projectOf(msg.chatId);
         const agent = cwd ? this.registry.getAgent(cwd) : undefined;
         if (agent?.agentId) {
-          await this.client.abort(agent.agentId).catch(() => {});
+          await this.sessionFor(agent.agentId).abort().catch(() => {});
           await reply('⏹ 已请求停止');
         } else {
           await reply('已经移除的 Agent');
@@ -766,10 +1013,24 @@ export class Bridge {
       }
       case 'agents': {
         await this.pruneDeadAgents(); // 已回收的直接解绑，不再展示
+        // 终端感知机器人：列出已注册的终端 pi 会话（不去重，一进程一条）
+        if (this.deps.terminal) {
+          const rows = this.deps.terminal.listSessions().map((e) => ({
+            cwd: e.info.cwd,
+            label: `${e.info.label ?? projectLabel(e.info.cwd)} · pid ${e.info.pid}`,
+            agentId: e.info.sessionId,
+            state: e.online ? (e.busy ? '🔴 运行中' : '🟢 空闲') : '⚪ 离线',
+              // 必须带上 sessionId：同 cwd 可有多个终端，cwd 不足以定位
+              sessionId: e.info.sessionId,
+          }));
+          const cur = this.registry.projectOf(msg.chatId);
+          await this.sendRouteCard(msg.chatId, agentsCard(rows, cur), cur, cur);
+          break;
+        }
         const entries = this.registry.agentEntries();
         const rows = await Promise.all(
           entries.map(async (e) => {
-            const st = await this.client.getState(e.agentId).catch(() => null);
+            const st = await this.sessionFor(e.agentId).getState().catch(() => null);
             const state = st?.running
               ? st.state?.isPromptRunning || st.state?.isStreaming
                 ? '🔴 运行中'
@@ -788,6 +1049,13 @@ export class Bridge {
         break;
       }
       case 'last': {
+        // 终端会话：拉取真实会话历史（不区分后端，不过滤 —— 含用户终端发起的回合）
+        if (this.deps.terminal) {
+          const sid = this.deps.terminal.boundSession(msg.chatId, this.deps.botId);
+          if (!sid) return reply('当前会话未绑定终端 pi，请先 /switch 选择');
+          await this.sendTerminalLastCard(msg.chatId, sid);
+          break;
+        }
         const cwd = this.registry.projectOf(msg.chatId);
         if (!cwd) {
           // 未绑定 → 引导用户去 /info 选项目
@@ -802,7 +1070,7 @@ export class Bridge {
         }
         const sid = result.sid;
         try {
-          const st0 = await this.client.getState(sid).catch(() => null);
+          const st0 = await this.sessionFor(sid).getState().catch(() => null);
           const busy = !!st0?.running && !!(st0.state?.isPromptRunning || st0.state?.isStreaming);
           if (busy) {
             const snapshot = await this.client.getLiveProgress(sid);
@@ -826,9 +1094,8 @@ export class Bridge {
             log.info(`[bot=${this.deps.botId}] /last 挂接执行中轮次 sid=${sid.slice(-6)}`);
             void attachRunningTurn(
               this.channel,
-              this.client,
+              this.sessionFor(sid),
               msg.chatId,
-              sid,
               this.deps.pending,
               projectLabel(cwd),
               snapshot,
@@ -846,7 +1113,7 @@ export class Bridge {
           const lastText = r.text || '（无历史记录）';
           const modelRef = r.modelRef;
           // 当前 agent 状态（空闲 / 工作中 / 已回收）
-          const st = await this.client.getState(finalSid).catch(() => null);
+          const st = await this.sessionFor(finalSid).getState().catch(() => null);
           const state = st?.running
             ? st.state?.isPromptRunning || st.state?.isStreaming
               ? '🔴 工作中'
@@ -864,6 +1131,24 @@ export class Bridge {
         break;
       }
       case 'model': {
+        // 终端会话：切换该 pi 会话的模型
+        if (this.deps.terminal) {
+          if (!rest) return reply('格式：/model provider/modelId');
+          const slash = rest.indexOf('/');
+          if (slash <= 0) return reply('格式：/model provider/modelId');
+          const provider = rest.slice(0, slash);
+          const modelId = rest.slice(slash + 1);
+          const sid = this.deps.terminal.boundSession(msg.chatId, this.deps.botId);
+          if (!sid) return reply('当前会话未绑定终端 pi，请先 /switch 选择');
+          const res = await this.deps.terminal.request(sid, {
+            type: 'setModel',
+            requestId: crypto.randomUUID(),
+            provider,
+            modelId,
+          });
+          if (!res) return reply('❌ 终端会话无响应（可能已离线）');
+          return reply(res.ok ? `✅ 已切换模型为 ${rest}` : `❌ 切换失败：${res.error ?? '未知错误'}`);
+        }
         // 模型选择已合并到 /info；这里仅支持 /model provider/modelId 直接切
         // 无参不做特判，统一落到「未知指令」→ help 卡
         if (!rest) return replyCard(this.helpCard());
@@ -874,8 +1159,8 @@ export class Bridge {
         const cwd = this.registry.projectOf(msg.chatId);
         const agent = cwd ? this.registry.getAgent(cwd) : undefined;
         if (!agent?.agentId) return reply('已经移除的 Agent');
-        await this.client
-          .setModel(agent.agentId, provider, modelId)
+        await this.sessionFor(agent.agentId)
+          .setModel(provider, modelId)
           .catch((e) => void reply(`❌ ${String(e).slice(0, 200)}`));
         await reply(`✅ 模型已设为 ${provider}/${modelId}（下一轮生效）`);
         break;
@@ -884,4 +1169,33 @@ export class Bridge {
         await replyCard(this.helpCard());
     }
   }
+}
+
+/** 从 pi 会话条目里取最后一条文本（assistant 优先，其次 user 提问）。
+ *  **不做过滤** —— 按 D2/D4，/last 显示全部，含用户在终端自己发起的回合。 */
+function latestAssistantText(entries: unknown[] | undefined): string {
+  const list = (entries ?? []) as Array<{
+    type?: string;
+    message?: { role?: string; content?: Array<{ type?: string; text?: string }> };
+  }>;
+  const textsOf = (e: (typeof list)[number]): string =>
+    (e.message?.content ?? [])
+      .filter((c) => c.type === 'text' && c.text)
+      .map((c) => c.text ?? '')
+      .join('');
+  for (let i = list.length - 1; i >= 0; i--) {
+    const e = list[i];
+    if (e.message?.role === 'assistant') {
+      const t = textsOf(e);
+      if (t.trim()) return t;
+    }
+  }
+  for (let i = list.length - 1; i >= 0; i--) {
+    const e = list[i];
+    if (e.message?.role === 'user') {
+      const t = textsOf(e);
+      if (t.trim()) return `💭 提问：${t}`;
+    }
+  }
+  return '';
 }

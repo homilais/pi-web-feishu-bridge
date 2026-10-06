@@ -944,6 +944,8 @@ export class Bridge {
             label: `${e.info.label ?? projectLabel(e.info.cwd)} · pid ${e.info.pid}`,
             agentId: e.info.sessionId,
             state: e.online ? (e.busy ? '🔴 运行中' : '🟢 空闲') : '⚪ 离线',
+              // 必须带上 sessionId：同 cwd 可有多个终端，cwd 不足以定位
+              sessionId: e.info.sessionId,
           }));
           const cur = this.registry.projectOf(msg.chatId);
           await this.sendRouteCard(msg.chatId, agentsCard(rows, cur), cur, cur);

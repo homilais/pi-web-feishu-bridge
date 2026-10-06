@@ -143,6 +143,34 @@ export class Bridge {
   }
 
   /** 发 /info 卡片。notice：卡片顶部提示条（与文本合并成一条消息）。 */
+  /** 终端会话的「最后一次消息」卡片 —— /last 与切换绑定后共用，
+   *  使终端与 pi-web 的切换体验一致（切换后立刻看到上下文摘要）。 */
+  private async sendTerminalLastCard(chatId: string, sessionId: string, notice?: string): Promise<void> {
+    const t = this.deps.terminal;
+    if (!t) return;
+    const entry = t.listSessions().find((e) => e.info.sessionId === sessionId);
+    const res = await t.request(sessionId, { type: 'pullState', requestId: crypto.randomUUID() });
+    if (!res) {
+      await this.sendErr(chatId, '❌ 终端会话无响应（可能已离线），请稍后重试');
+      return;
+    }
+    const text = latestAssistantText(res.entries);
+    const label = entry?.info.label ?? projectLabel(entry?.info.cwd ?? '');
+    const state = res.idle ? '🟢 空闲' : '🔴 工作中';
+    await this.sendRouteCard(
+      chatId,
+      lastReplyCard({
+        projectLabel: label,
+        modelRef: res.model,
+        state,
+        text: text || '（暂无文本回复）',
+      }),
+      entry?.info.cwd,
+      sessionId,
+    );
+    if (notice) await this.sendErr(chatId, notice);
+  }
+
   /** 取终端会话当前模型（复用 T5 的 pullState 通路）。 */
   private async terminalModelRef(sessionId: string): Promise<string | undefined> {
     const res = await this.deps.terminal!.request(sessionId, {
@@ -573,9 +601,11 @@ export class Bridge {
         t.bindChat(evt.chatId, sid, this.deps.botId);
         this.registry.bindProject(evt.chatId, entry.info.cwd);
         const label = entry.info.label ?? projectLabel(entry.info.cwd);
-        await this.sendErr(
+        // 与 pi-web 对齐：切换绑定后立刻返回最后一次会话信息，而非只提示成功
+        await this.sendTerminalLastCard(
           evt.chatId,
-          `✅ 已选中终端会话 ${label}（pid ${entry.info.pid}）${entry.online ? '' : ' ⚠️ 当前离线'}\n直接发消息即可下达指令；/last 看历史，/abort 停止。`,
+          sid,
+          `✅ 已选中终端会话 ${label}（pid ${entry.info.pid}）${entry.online ? '' : ' ⚠️ 当前离线'}`,
         );
         return;
       }
@@ -1021,26 +1051,9 @@ export class Bridge {
       case 'last': {
         // 终端会话：拉取真实会话历史（不区分后端，不过滤 —— 含用户终端发起的回合）
         if (this.deps.terminal) {
-          const t = this.deps.terminal;
-          const sid = t.boundSession(msg.chatId, this.deps.botId);
+          const sid = this.deps.terminal.boundSession(msg.chatId, this.deps.botId);
           if (!sid) return reply('当前会话未绑定终端 pi，请先 /switch 选择');
-          const entry = t.listSessions().find((e) => e.info.sessionId === sid);
-          const res = await t.request(sid, { type: 'pullState', requestId: crypto.randomUUID() });
-          if (!res) return reply('❌ 终端会话无响应（可能已离线），请稍后重试');
-          const text = latestAssistantText(res.entries);
-          const label = entry?.info.label ?? projectLabel(entry?.info.cwd ?? '');
-          const state = res.idle ? '🟢 空闲' : '🔴 工作中';
-          await this.sendRouteCard(
-            msg.chatId,
-            lastReplyCard({
-              projectLabel: label,
-              modelRef: res.model,
-              state,
-              text: text || '（暂无文本回复）',
-            }),
-            entry?.info.cwd,
-            sid,
-          );
+          await this.sendTerminalLastCard(msg.chatId, sid);
           break;
         }
         const cwd = this.registry.projectOf(msg.chatId);

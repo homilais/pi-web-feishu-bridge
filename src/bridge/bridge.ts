@@ -164,7 +164,13 @@ export class Bridge {
       return this.projectCache.data;
     }
     try {
-      const enumerated = await this.client.listProjects();
+      // 排除终端 pi 的会话：pi-web 与终端 pi 共用同一份会话存储，
+      // 不排除的话 pi-web 可能选中终端正在跑的会话作为本 cwd 的代表 agent，
+      // 导致两个 pi 进程写同一个 session 文件。
+      const terminalIds = new Set(
+        this.deps.terminal?.listSessions().map((e) => e.info.sessionId) ?? [],
+      );
+      const enumerated = await this.client.listProjects(terminalIds);
       const map = new Map<string, ProjectInfo>();
       for (const p of enumerated) {
         // 按本机器人范围过滤：默认机器人排除限定机器人声明的 cwd；限定机器人只留 declaredCwds

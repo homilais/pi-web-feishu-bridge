@@ -211,10 +211,15 @@ export class PiWebClient {
   }
 
   /** 枚举所有项目空间（聚合 /api/sessions + 逐项目 getState）。
-   *  关键修正：runningSessionIds 只含「正在跑任务」的，不含空闲进程。
+   *  关键修正：runningSessionIds 只含「正在跑任务」的，不含空闲进程，
    *  所以「有无进程」必须用 GET /api/agent/{id}.running（isAlive）判断，
-   *  不能用 runningSessionIds。每个 cwd 取一个代表 session 查。 */
-  async listProjects(): Promise<ProjectInfo[]> {
+   *  不能用 runningSessionIds。每个 cwd 取一个代表 session 查。
+   *
+   *  @param excludeSessionIds 需排除的会话（如终端 pi 的会话）。pi-web 与终端 pi
+   *    共用同一份会话存储，若不排除，pi-web 可能把终端正在跑的会话选为自己的
+   *    代表 agent，导致两个 pi 进程写同一个 session 文件。
+   */
+  async listProjects(excludeSessionIds?: ReadonlySet<string>): Promise<ProjectInfo[]> {
     const sess = await this.listSessions();
     // running 的 session（优先选为代表）
     const runningIds = new Set(
@@ -226,6 +231,8 @@ export class PiWebClient {
       { count: number; rep?: { id: string; modified: string; running: boolean } }
     >();
     for (const s of sess.sessions) {
+      // 排除终端 pi 的会话：不作为本 cwd 的代表，也不计入 sessionCount
+      if (excludeSessionIds?.has(s.id)) continue;
       const e = byCwd.get(s.cwd) ?? { count: 0 };
       e.count++;
       const isRunning = runningIds.has(s.id);

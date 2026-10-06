@@ -523,14 +523,14 @@ export class Bridge {
     // 终端会话：按 sessionId 绑定（/agents 卡片按钮会带；同 cwd 可多终端，cwd 不足以定位）
     if (this.deps.terminal) {
       const t = this.deps.terminal;
-      const sid = sessionId ?? t.boundSession(evt.chatId);
+      const sid = sessionId ?? t.boundSession(evt.chatId, this.deps.botId);
       if (sid) {
         const entry = t.listSessions().find((e) => e.info.sessionId === sid);
         if (!entry) {
           await this.sendErr(evt.chatId, '⚠️ 该终端会话已不可用（可能已退出），请重新 /agents 选择');
           return;
         }
-        t.bindChat(evt.chatId, sid);
+        t.bindChat(evt.chatId, sid, this.deps.botId);
         this.registry.bindProject(evt.chatId, entry.info.cwd);
         const label = entry.info.label ?? projectLabel(entry.info.cwd);
         await this.sendErr(

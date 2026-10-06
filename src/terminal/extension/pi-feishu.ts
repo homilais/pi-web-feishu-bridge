@@ -152,6 +152,10 @@ let attached = false;
 export default function (pi: ExtensionAPI): void {
   // 不在 factory 里起 socket —— 某些调用加载扩展但不开会话
   pi.on('session_start', async (_ev, ctx) => {
+    // 只接管「交互式终端」里跑的 pi。pi 的扩展在 rpc/json/print 模式下同样会加载
+    // （见 pi 文档 extensions.md），若不判别，pi-web 拉起的每个 agent 都会把自己
+    // 注册成终端会话 —— 那属于 pi-web 通路，会造成重复与串扰。
+    if (ctx.mode !== 'tui') return;
     // 同一进程只允许一条通道：session_start 可能触发多次（续接/重载会话），
     // 重复连接会产生重复注册，使飞书 /agents 出现同一 pid 的多条。
     if (attached) return;

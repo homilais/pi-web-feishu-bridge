@@ -375,7 +375,7 @@ export class Bridge {
       );
 
       // 先把 prompt 下发到终端
-      const ok = terminal.dispatch(sessionId, { type: 'prompt', requestId: turnId, text });
+      const ok = await terminal.dispatchWhenReady(sessionId, { type: 'prompt', requestId: turnId, text });
       if (!ok) {
         await this.sendErr(chatId, '❌ 终端会话已离线，请重试');
         unsubscribe();

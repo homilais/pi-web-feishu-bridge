@@ -132,6 +132,22 @@ export class TerminalServer {
     this.chatBinding.delete(this.chatKey(chatId, botId));
   }
 
+  /** 下发命令；会话刚注册、���行连接尚未建立时短暂等待。
+   *  返回 false 表示确实无法送达（会话不存在或等待超时）。 */
+  /** 下发命令；会话刚注册、下行连接尚未建立时，异步等待其就绪。
+   *  扩展的顺序是「先 POST 注册、后 GET 建立 SSE」，两者之间存在窗口，
+   *  此刻直接 dispatch 会失败 —— 这正是「恢复会话后立刻发消息」的场景。 */
+  async dispatchWhenReady(sessionId: string, cmd: TerminalCommand, waitMs = 2000): Promise<boolean> {
+    if (this.dispatch(sessionId, cmd)) return true;
+    if (!this.entries.has(sessionId)) return false;
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+      if (this.dispatch(sessionId, cmd)) return true;
+    }
+    return false;
+  }
+
   /** 下发一条请求并等待扩展回应（带超时，避免永久挂起）。 */
   request(sessionId: string, cmd: TerminalCommand, timeoutMs = 8_000): Promise<TerminalResponse | null> {
     if (!this.dispatch(sessionId, cmd)) return Promise.resolve(null);
@@ -239,7 +255,9 @@ export class TerminalServer {
         // 重连保留原始 connectedAt，便于观测存活时长
         connectedAt: prev?.connectedAt ?? Date.now(),
         lastSeenAt: Date.now(),
-        online: true,
+        // 注册≠在线：下行 SSE 连上后（handle 的 stream 分支）才置 true，
+        // 否则会出现「已注册但命令下发失败」的窗口期（恢复会话后立即发消息）
+        online: false,
         busy: prev?.busy ?? false,
       });
       log.info(

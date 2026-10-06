@@ -437,7 +437,8 @@ export class Bridge {
     }
     if (cmd === 'switch') {
       const cwd = String(v.cwd ?? '');
-      if (cwd) return this.handleSwitch(evt, cwd);
+      // 终端会话按钮会带 sessionId（同 cwd 可多终端，cwd 不足以定位）
+      if (cwd) return this.handleSwitch(evt, cwd, v.sessionId ? String(v.sessionId) : undefined);
       return;
     }
     if (cmd === 'approve' || cmd === 'reject') {
@@ -512,7 +513,29 @@ export class Bridge {
    *  2. 不在 → 寻找已有 agentId 纳入会话管理（优先 running，然后非 running 历史）
    *  3. 未找到 → 更新项目列表让重新选择
    *  4. 找到 → 纳入 + 绑定 + 发送 last 卡片 */
-  private async handleSwitch(evt: CardActionEvent, cwd: string): Promise<void> {
+  private async handleSwitch(evt: CardActionEvent, cwd: string, sessionId?: string): Promise<void> {
+    // 终端会话：按 sessionId 绑定（/agents 卡片按钮会带；同 cwd 可多终端，cwd 不足以定位）
+    if (this.deps.terminal) {
+      const t = this.deps.terminal;
+      const sid = sessionId ?? t.boundSession(evt.chatId);
+      if (sid) {
+        const entry = t.listSessions().find((e) => e.info.sessionId === sid);
+        if (!entry) {
+          await this.sendErr(evt.chatId, '⚠️ 该终端会话已不可用（可能已退出），请重新 /agents 选择');
+          return;
+        }
+        t.bindChat(evt.chatId, sid);
+        this.registry.bindProject(evt.chatId, entry.info.cwd);
+        const label = entry.info.label ?? projectLabel(entry.info.cwd);
+        await this.sendErr(
+          evt.chatId,
+          `✅ 已选中终端会话 ${label}（pid ${entry.info.pid}）${entry.online ? '' : ' ⚠️ 当前离线'}\n直接发消息即可下达指令；/last 看历史，/abort 停止。`,
+        );
+        return;
+      }
+      await this.sendErr(evt.chatId, '⚠️ 请从 /agents 卡片中选择一个终端会话');
+      return;
+    }
     // 防御性范围校验：配置级不允许的 cwd 拒绝绑定（下拉已过滤，这里防越界）
     if (!this.isCwdInScope(cwd)) {
       await this.sendErr(

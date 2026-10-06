@@ -286,7 +286,7 @@ export function lastReplyCard(opts: {
 /** /agents：会话记录列表，每项可点击切换。
  *  副标题：会话总数 + 当前所在项目（若有）。 */
 export function agentsCard(
-  rows: { cwd: string; label: string; agentId: string; state: string }[],
+  rows: { cwd: string; label: string; agentId: string; state: string; sessionId?: string }[],
   currentCwd?: string,
 ): object {
   if (!rows.length) return card(TPL.agents, '🗂 会话记录', [md('（暂无活跃会话）')]);
@@ -296,7 +296,15 @@ export function agentsCard(
   // 不用 column_set 表格 —— 列宽固定，长内容会被截断/换行
   rows.forEach((r) => {
     const isCur = r.cwd === currentCwd;
-    elements.push(button(`${isCur ? '✅ ' : ''}${r.label} · ${r.state}  ·  ${r.agentId.slice(0, 8)}`, isCur ? 'primary' : 'default', { cmd: 'switch', cwd: r.cwd }));
+    // 终端会话以 sessionId 定位（同 cwd 可多终端，cwd 不足以区分）；
+    // pi-web 会话只传 cwd，保持原行为不变。
+    elements.push(
+      button(
+        `${isCur ? '✅ ' : ''}${r.label} · ${r.state}  ·  ${r.agentId.slice(0, 8)}`,
+        isCur ? 'primary' : 'default',
+        r.sessionId ? { cmd: 'switch', cwd: r.cwd, sessionId: r.sessionId } : { cmd: 'switch', cwd: r.cwd },
+      ),
+    );
   });
   return card(
     TPL.agents,

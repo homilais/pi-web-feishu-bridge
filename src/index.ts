@@ -120,7 +120,17 @@ export async function main(opts: MainOptions = {}): Promise<void> {
   // 启动每个机器人
   const bots: Awaited<ReturnType<typeof startBot>>[] = [];
   for (const bot of cfg.bots) {
-    bots.push(await startBot(bot, client, scopedCwdsGlobal, cfg.defaultModel, terminal));
+    bots.push(
+      await startBot(
+        bot,
+        client,
+        scopedCwdsGlobal,
+        cfg.defaultModel,
+        // 只给终端感知机器人注入；其余 bot 的 deps.terminal 保持 undefined，
+        // 否则 pi-web 机器人会误走终端分支（其 cwd/会话与终端无关）
+        bot.kind === 'pi-terminal' ? terminal : undefined,
+      ),
+    );
   }
 
   log.info(`✅ 桥接已就绪。${cfg.bots.length} 个机器人。在飞书里给机器人发消息试试。`);

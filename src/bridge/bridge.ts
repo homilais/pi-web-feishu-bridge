@@ -321,7 +321,7 @@ export class Bridge {
     const terminal = this.deps.terminal;
     if (!terminal) return;
     // 优先用 /switch 绑定的 sessionId（同 cwd 可多终端，不能靠 cwd 猜）
-    const bound = terminal.boundSession(chatId);
+    const bound = terminal.boundSession(chatId, this.deps.botId);
     let entry = bound
       ? terminal.listSessions().find((e) => e.info.sessionId === bound)
       : undefined;
@@ -336,7 +336,7 @@ export class Bridge {
         return;
       }
       entry = sessions[sessions.length - 1];
-      terminal.bindChat(chatId, entry.info.sessionId);
+      terminal.bindChat(chatId, entry.info.sessionId, this.deps.botId);
     }
     const sessionId = entry.info.sessionId;
     const label = entry.info.label ?? projectLabel(cwd);
@@ -445,7 +445,7 @@ export class Bridge {
       const requestId = String(v.requestId ?? '');
       // 终端会话：审批结论需下发到扩展，由扩展的竞速逻辑撤掉终端弹窗
       if (this.deps.terminal) {
-        const sid = this.deps.terminal.boundSession(evt.chatId);
+        const sid = this.deps.terminal.boundSession(evt.chatId, this.deps.botId);
         if (sid) {
           this.deps.terminal.dispatch(sid, {
             type: 'resolveApproval',
@@ -864,7 +864,7 @@ export class Bridge {
             break;
           }
           const chosen = target ?? all[all.length - 1];
-          t.bindChat(msg.chatId, chosen.info.sessionId);
+          t.bindChat(msg.chatId, chosen.info.sessionId, this.deps.botId);
           this.registry.bindProject(msg.chatId, chosen.info.cwd);
           await reply(
             `✅ 已切换到终端会话 ${chosen.info.label ?? '?'}（pid ${chosen.info.pid}）${chosen.online ? '' : ' ⚠️ 该会话当前离线'}`,
@@ -890,7 +890,7 @@ export class Bridge {
       case 'abort': {
         // 终端会话：飞书可中止**任何**回合（含用户在终端发起的）—— 中止是收回控制权
         if (this.deps.terminal) {
-          const sid = this.deps.terminal.boundSession(msg.chatId);
+          const sid = this.deps.terminal.boundSession(msg.chatId, this.deps.botId);
           if (!sid) return reply('当前会话未绑定终端 pi，请先 /switch 选择');
           const ok = this.deps.terminal.dispatch(sid, {
             type: 'abort',
@@ -976,7 +976,7 @@ export class Bridge {
         // 终端会话：拉取真实会话历史（不区分后端，不过滤 —— 含用户终端发起的回合）
         if (this.deps.terminal) {
           const t = this.deps.terminal;
-          const sid = t.boundSession(msg.chatId);
+          const sid = t.boundSession(msg.chatId, this.deps.botId);
           if (!sid) return reply('当前会话未绑定终端 pi，请先 /switch 选择');
           const entry = t.listSessions().find((e) => e.info.sessionId === sid);
           const res = await t.request(sid, { type: 'pullState', requestId: crypto.randomUUID() });
@@ -1079,7 +1079,7 @@ export class Bridge {
           if (slash <= 0) return reply('格式：/model provider/modelId');
           const provider = rest.slice(0, slash);
           const modelId = rest.slice(slash + 1);
-          const sid = this.deps.terminal.boundSession(msg.chatId);
+          const sid = this.deps.terminal.boundSession(msg.chatId, this.deps.botId);
           if (!sid) return reply('当前会话未绑定终端 pi，请先 /switch 选择');
           const res = await this.deps.terminal.request(sid, {
             type: 'setModel',

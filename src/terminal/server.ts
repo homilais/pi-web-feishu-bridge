@@ -39,8 +39,12 @@ export class TerminalServer {
   private readonly connections = new Map<string, Connection>();
   private readonly entries = new Map<string, TerminalRegistryEntry>();
   private readonly listeners = new Map<string, Set<SessionListener>>();
-  /** chatId → 选中的终端 sessionId（同 cwd 可多终端，故不能用 cwd 当键）。 */
+  /** chatId → 选中的终端 sessionId（同 cwd 可多终端，故不能用 cwd 当键）。
+   *  键含 botId：万一将来允许多个终端机器人，绑定也不会互相覆盖。 */
   private readonly chatBinding = new Map<string, string>();
+  private chatKey(chatId: string, botId?: string): string {
+    return botId ? `${botId}:${chatId}` : chatId;
+  }
   /** requestId → 等待中的请求（T5 的请求-响应通路）。 */
   private readonly pending = new Map<string, (res: TerminalResponse) => void>();
   private readonly factory?: TerminalSessionFactory;
@@ -114,18 +118,18 @@ export class TerminalServer {
   }
 
   /** 把某个飞书会话绑定到指定的终端会话（/switch 用）。 */
-  bindChat(chatId: string, sessionId: string): void {
-    this.chatBinding.set(chatId, sessionId);
+  bindChat(chatId: string, sessionId: string, botId?: string): void {
+    this.chatBinding.set(this.chatKey(chatId, botId), sessionId);
   }
 
   /** 取该飞书会话绑定的终端 sessionId。 */
-  boundSession(chatId: string): string | undefined {
-    return this.chatBinding.get(chatId);
+  boundSession(chatId: string, botId?: string): string | undefined {
+    return this.chatBinding.get(this.chatKey(chatId, botId));
   }
 
   /** 解除绑定（/release 或会话清理）。 */
-  unbindChat(chatId: string): void {
-    this.chatBinding.delete(chatId);
+  unbindChat(chatId: string, botId?: string): void {
+    this.chatBinding.delete(this.chatKey(chatId, botId));
   }
 
   /** 下发一条请求并等待扩展回应（带超时，避免永久挂起）。 */

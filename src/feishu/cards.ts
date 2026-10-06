@@ -283,6 +283,65 @@ export function lastReplyCard(opts: {
   );
 }
 
+/** 终端感知机器人的 /info：当前绑定 + 终端会话下拉（可切换）+ 模型切换。
+ *  与 statusCard 的区别：可绑定集合是「已注册的终端 pi 会话」而非 pi-web 项目。 */
+export function terminalInfoCard(opts: {
+  currentSessionId?: string;
+  sessions: { cwd: string; label: string; agentId: string; state: string; sessionId: string }[];
+  currentModelRef?: string;
+  models?: ModelsEnabledResponse | null;
+  notice?: string;
+}): object {
+  const { currentSessionId, sessions, currentModelRef, models } = opts;
+  const cur = currentSessionId ? sessions.find((s) => s.sessionId === currentSessionId) : undefined;
+  const curLabel = cur?.label ?? '未选择';
+  const curState = cur ? cur.state : '—';
+  const elements: object[] = [];
+  if (opts.notice) elements.push(md(`📌 ${opts.notice}`));
+
+  // 终端会话下拉：value 用 sessionId，与 handleSwitch 的终端分支对齐
+  if (sessions.length) {
+    const options: SelectOption[] = sessions.map((s) => ({
+      label: `${s.label} · ${s.state}`,
+      value: `terminal:${s.sessionId}`,
+    }));
+    elements.push(hr(), md('**切换终端会话**'));
+    elements.push(
+      selectMenu(
+        '选择终端 pi 会话…',
+        options,
+        currentSessionId ? `terminal:${currentSessionId}` : undefined,
+      ),
+    );
+  } else {
+    elements.push(hr(), md('（还没有终端会话。请先在终端运行 `pi`）'));
+  }
+
+  // 模型切换：终端会话也支持 /model
+  if (models && cur) {
+    const modelOpts: SelectOption[] = [
+      { label: '默认（保留当前模型，不更换）', value: 'model:default' },
+      ...models.providers.flatMap((p) =>
+        (p.models ?? []).map((m) => ({
+          label: `${p.name} · ${m.name}${currentModelRef === m.ref ? '  ✅当前' : ''}`,
+          value: `model:${m.ref}`,
+        })),
+      ),
+    ];
+    elements.push(hr(), md('**切换模型**（下一轮生效）'));
+    elements.push(
+      selectMenu('选择模型…', modelOpts, currentModelRef ? `model:${currentModelRef}` : 'model:default'),
+    );
+  }
+
+  return card(
+    TPL.info,
+    `🖥 ${curLabel}`,
+    elements,
+    [curState, currentModelRef ?? '未设置'].join('  ·  '),
+  );
+}
+
 /** /agents：会话记录列表，每项可点击切换。
  *  副标题：会话总数 + 当前所在项目（若有）。 */
 export function agentsCard(

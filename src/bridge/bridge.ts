@@ -17,6 +17,7 @@ import {
   agentsCard,
   progressCard,
   streamCard,
+  terminalInfoCard,
 } from '../feishu/cards.ts';
 import { TurnState } from './turn-state.ts';
 import { logger } from '../log.ts';
@@ -142,7 +143,42 @@ export class Bridge {
   }
 
   /** 发 /info 卡片。notice：卡片顶部提示条（与文本合并成一条消息）。 */
+  /** 取终端会话当前模型（复用 T5 的 pullState 通路）。 */
+  private async terminalModelRef(sessionId: string): Promise<string | undefined> {
+    const res = await this.deps.terminal!.request(sessionId, {
+      type: 'pullState',
+      requestId: crypto.randomUUID(),
+    });
+    return res?.model;
+  }
+
   private async sendInfoCard(chatId: string, notice?: string): Promise<void> {
+    // 终端感知机器人：/info 展示已注册的终端会话（而非 pi-web 项目）
+    if (this.deps.terminal) {
+      const t = this.deps.terminal;
+      const bound = t.boundSession(chatId, this.deps.botId);
+      const sessions = t.listSessions().map((e) => ({
+        cwd: e.info.cwd,
+        label: `${e.info.label ?? projectLabel(e.info.cwd)} · pid ${e.info.pid}`,
+        agentId: e.info.sessionId,
+        state: e.online ? (e.busy ? '🔴 运行中' : '🟢 空闲') : '⚪ 离线',
+        sessionId: e.info.sessionId,
+      }));
+      const models = bound ? await this.getModelsCached() : null;
+      await this.sendRouteCard(
+        chatId,
+        terminalInfoCard({
+          currentSessionId: bound,
+          sessions,
+          currentModelRef: bound ? await this.terminalModelRef(bound).catch(() => undefined) : undefined,
+          models,
+          notice,
+        }),
+        bound ? sessions.find((s) => s.sessionId === bound)?.cwd : undefined,
+        bound,
+      );
+      return;
+    }
     await this.pruneDeadAgents(); // 先清理已回收的再展示
     const projects = await this.getProjects(true);
     const cur = this.registry.projectOf(chatId);
@@ -435,6 +471,10 @@ export class Bridge {
     if (cmd === 'select' && sel) {
       if (sel.startsWith('model:')) return this.handleSetModel(evt, sel.slice(6));
       if (sel.startsWith('project:')) return this.handleSwitch(evt, sel.slice(8));
+        // /info 的终端会话下拉：值形如 terminal:<sessionId>
+        if (sel.startsWith('terminal:')) {
+          return this.handleSwitch(evt, '', sel.slice(9));
+        }
     }
     // 兼容旧按钮
     if (cmd === 'setmodel') {
